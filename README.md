@@ -97,15 +97,7 @@ Manage your environment via the in-app **Settings** modal:
 
 ---
 
-## 🏆 Team GGU AI 
-
-| Member | Focus |
-| :--- | :--- |
-| **Saiyam Kumar** | Team Leader & Integration Architect |
-| **GGU AI ORGANISERS** | Autonomous Agent Development |
-
----
-
 ## 📜 License
-Distributed under the MIT License. © 2026 GGU AI ORGANISERS.
+Distributed under the MIT License. © 2026 GGU AI.
+
 
