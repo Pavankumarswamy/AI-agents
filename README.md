@@ -32,11 +32,6 @@ Run the automated build script to create your standalone `.exe`:
 
 ## 🔥 Key Features
 
-### 🎙️ LUCA: High-Performance Voice Assistant
-- **Ultra-Low Latency**: Near real-time response (<400ms) with fuzzy-matching cache.
-- **Sarvam AI Integration**: High-quality TTS using the Bulbul v3 model for natural interaction.
-- **Voice Intelligence**: Peak-based silence detection for fluid, uninterrupted conversations.
-
 ### 🛠️ Interactive Developer Workspace
 - **Smart Terminal 2.0**: Bidirectional communication with support for interactive inputs (e.g., `flutter run`).
 - **Enhanced UI Controls**: Minimize, maximize, and resizable terminal window with clickable file paths.
@@ -68,13 +63,11 @@ graph TD
     subgraph Integrated App Bundle
         UI --> Terminal[Interactive Shell]
         UI --> Editor[Monaco Editor]
-        UI --> LUCA[Voice Interaction Engine]
         Launcher[App Launcher] --> Backend[Bundled backend.exe]
     end
     Backend --> Agent[GGU AI Pipeline]
     Agent --> Git[Git Manager]
     Agent --> LLM((NVIDIA/Ollama/Custom))
-    LUCA --> Sarvam[Sarvam AI API]
 ```
 
 ---
