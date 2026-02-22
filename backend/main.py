@@ -897,6 +897,73 @@ async def delete_item(req: DeleteItemRequest):
         return {"message": "Deleted", "files": updated_live}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
+class RenameItemRequest(BaseModel):
+    run_id: str
+    old_path: str
+    new_name: str
+
+class CopyItemRequest(BaseModel):
+    run_id: str
+    src_path: str
+    dest_path: str
+    move: bool = False  # True = Cut+Paste (move), False = Copy+Paste
+
+@app.post("/rename")
+async def rename_item(req: RenameItemRequest):
+    target = get_repo_path(req.run_id)
+    if not target: raise HTTPException(status_code=404, detail="Project path not found")
+
+    src = (target / req.old_path).resolve()
+    dest = src.parent / req.new_name
+    if not str(src).startswith(str(target.resolve())):
+        raise HTTPException(status_code=403, detail="Illegal path traversal attempt")
+    if dest.exists():
+        raise HTTPException(status_code=400, detail=f"'{req.new_name}' already exists")
+    try:
+        src.rename(dest)
+        from git_utils import get_all_files
+        try:
+            from git import Repo
+            updated_live = get_all_files(Repo(target))
+        except Exception:
+            class MockRepo:
+                def __init__(self, p): self.working_dir = str(p)
+            updated_live = get_all_files(MockRepo(target))
+        if req.run_id in runs: runs[req.run_id]["live"]["files"] = updated_live
+        return {"message": "Renamed", "files": updated_live}
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/copy")
+async def copy_item(req: CopyItemRequest):
+    target = get_repo_path(req.run_id)
+    if not target: raise HTTPException(status_code=404, detail="Project path not found")
+
+    src = (target / req.src_path).resolve()
+    dest = (target / req.dest_path).resolve()
+    if not str(src).startswith(str(target.resolve())) or not str(dest).startswith(str(target.resolve())):
+        raise HTTPException(status_code=403, detail="Illegal path traversal attempt")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if req.move:
+            shutil.move(str(src), str(dest))
+        elif src.is_dir():
+            shutil.copytree(str(src), str(dest))
+        else:
+            shutil.copy2(str(src), str(dest))
+        from git_utils import get_all_files
+        try:
+            from git import Repo
+            updated_live = get_all_files(Repo(target))
+        except Exception:
+            class MockRepo:
+                def __init__(self, p): self.working_dir = str(p)
+            updated_live = get_all_files(MockRepo(target))
+        if req.run_id in runs: runs[req.run_id]["live"]["files"] = updated_live
+        return {"message": "Moved" if req.move else "Copied", "files": updated_live}
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
+
+
 @app.websocket("/ws/terminal/{run_id}")
 async def terminal_websocket(websocket: WebSocket, run_id: str):
     """Handle real-time interactive terminal with stdin support."""

@@ -8,10 +8,12 @@ import { useApp } from '../App';
 const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
     const { API_BASE, runState, setRunState, configStatus, snippets, setSnippets } = useApp();
     const [input, setInput] = useState('');
-    const [showConfig, setShowConfig] = useState(false);
-    const [apiData, setApiData] = useState(() => {
-        return JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}');
-    });
+    const [mentionQuery, setMentionQuery] = useState(null);
+    const [mentionIndex, setMentionIndex] = useState(0);
+    const [mentionMap, setMentionMap] = useState({}); // Stores @label -> fullPath mapping
+    const [showSettings, setShowSettings] = useState(false);
+    const [localApiData, setLocalApiData] = useState(() => JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}'));
+    const apiData = localApiData;
 
     const [messages, setMessages] = useState([]);
     const [sessionId, setSessionId] = useState('default');
@@ -58,14 +60,69 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
         fetchHistory();
     }, [runState.runId, sessionId, API_BASE]);
 
-    useEffect(() => {
-        localStorage.setItem('GGU AI_custom_api', JSON.stringify(apiData));
-    }, [apiData]);
+
+
+    const handleInputChange = (e) => {
+        const value = e.target.value;
+        const cursorPos = e.target.selectionStart;
+        setInput(value);
+
+        // Detect @ mention
+        const textBeforeCursor = value.substring(0, cursorPos);
+        const lastAtIndices = [...textBeforeCursor.matchAll(/@/g)];
+        if (lastAtIndices.length > 0) {
+            const lastAtIndex = lastAtIndices[lastAtIndices.length - 1].index;
+            const query = textBeforeCursor.substring(lastAtIndex + 1);
+            // Only trigger if no space between @ and cursor
+            if (!query.includes(' ')) {
+                setMentionQuery(query);
+                setMentionIndex(0);
+                return;
+            }
+        }
+        setMentionQuery(null);
+    };
+
+    const suggestions = mentionQuery !== null
+        ? (runState.live?.files || [])
+            .map(f => f.path)
+            .filter(p => p.toLowerCase().includes(mentionQuery.toLowerCase()))
+            .slice(0, 8)
+        : [];
+
+    const applyMention = (filePath) => {
+        const cursorPos = document.getElementById('chat-input-area').selectionStart;
+        const textBeforeCursor = input.substring(0, cursorPos);
+        const lastAtIndex = textBeforeCursor.lastIndexOf('@');
+        const textAfterCursor = input.substring(cursorPos);
+
+        const fileName = filePath.split('/').pop();
+        const label = `@${fileName}`;
+
+        // Update mention map
+        setMentionMap(prev => ({ ...prev, [label]: filePath }));
+
+        const newValue = input.substring(0, lastAtIndex) + label + ' ' + textAfterCursor;
+        setInput(newValue);
+        setMentionQuery(null);
+        // Focus back
+        setTimeout(() => document.getElementById('chat-input-area').focus(), 10);
+    };
 
     const sendMessage = async () => {
         if (!input.trim() || loading) return;
 
-        const userMsg = input;
+        // Process input to replace labels with technical brackets for backend
+        let technicalMsg = input;
+        Object.entries(mentionMap).forEach(([label, path]) => {
+            // Use regex to replace all occurrences of the label (boundary check)
+            const regex = new RegExp(`${label}\\b`, 'g');
+            technicalMsg = technicalMsg.replace(regex, `[${path}]`);
+        });
+
+        const userMsg = input; // Displayed to user
+        const finalBackendMsg = technicalMsg; // Sent to backend
+
         setInput('');
         setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
         setLoading(true);
@@ -75,16 +132,16 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
             const activeFile = repoFiles.find(f => f.path === currentFile?.path);
 
             // Combine snippets into the message if any exist
-            let finalMessage = userMsg;
+            let payloadMessage = finalBackendMsg;
             if (snippets.length > 0) {
-                finalMessage += "\n\n### ATTACHED CODE SNIPPETS\n";
+                payloadMessage += "\n\n### ATTACHED CODE SNIPPETS\n";
                 snippets.forEach(s => {
-                    finalMessage += `File: ${s.path}\n\`\`\`\n${s.content}\n\`\`\`\n`;
+                    payloadMessage += `File: ${s.path}\n\`\`\`\n${s.content}\n\`\`\`\n`;
                 });
             }
 
             const { data } = await axios.post(`${API_BASE}/chat`, {
-                message: finalMessage,
+                message: payloadMessage,
                 run_id: runState.runId,
                 file_path: currentFile?.path,
                 file_content: activeFile?.content || '',
@@ -116,15 +173,7 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
         }
     };
 
-    const applyProvider = (p) => {
-        const presets = {
-            openai: { base_url: 'https://api.openai.com/v1', model: 'gpt-4o' },
-            anthropic: { base_url: 'https://api.anthropic.com/v1', model: 'claude-3-opus-20240229' },
-            ollama: { base_url: 'http://localhost:11434/v1', model: 'llama3' },
-            nvidia: { base_url: 'https://integrate.api.nvidia.com/v1', model: 'mistralai/mixtral-8x22b-instruct-v0.1' }
-        };
-        setApiData({ ...apiData, ...presets[p] });
-    };
+
 
     return (
         <div className="chat-sidebar">
@@ -144,8 +193,12 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
                             <span className="dot"></span>
                             <span className="model-name">{activeModel.split('/').pop()}</span>
                         </div>
-                        <button className="settings-btn" onClick={() => setShowConfig(!showConfig)} title="Provider Settings">
-                            ⚙️
+                        <button
+                            className={`settings-toggle ${showSettings ? 'active' : ''}`}
+                            onClick={() => setShowSettings(v => !v)}
+                            title="Custom LLM Settings"
+                        >
+                            <span className="gear-icon">⚙</span>
                         </button>
                     </div>
                 </div>
@@ -178,32 +231,71 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
                 </div>
             </div>
 
-            {showConfig && (
-                <div className="chat-config-panel anim-slide-down">
+            {/* ── Custom LLM Config Panel ── */}
+            {showSettings && (
+                <div className="chat-config-panel" style={{ marginTop: '30px' }}>
                     <div className="config-inner">
                         <div className="config-header">
-                            <h5>LLM Configuration</h5>
-                            <button className="btn-text" onClick={() => setApiData({})}>Reset</button>
-                        </div>
-                        <div className="provider-grid">
-                            <button onClick={() => applyProvider('openai')} className="provider-btn">OpenAI</button>
-                            <button onClick={() => applyProvider('anthropic')} className="provider-btn">Anthropic</button>
-                            <button onClick={() => applyProvider('nvidia')} className="provider-btn">NVIDIA</button>
-                            <button onClick={() => applyProvider('ollama')} className="provider-btn">Ollama</button>
+                            <h5>⚙️ Custom LLM Setup</h5>
+                            <button className="settings-toggle" onClick={() => setShowSettings(false)} style={{ fontSize: '0.8rem' }}>✕</button>
                         </div>
                         <div className="config-fields">
                             <div className="field-group">
                                 <label>Base URL</label>
-                                <input placeholder="https://..." value={apiData.base_url || ''} onChange={e => setApiData({ ...apiData, base_url: e.target.value })} />
-                            </div>
-                            <div className="field-group">
-                                <label>Model Name</label>
-                                <input placeholder="gpt-4o..." value={apiData.model || ''} onChange={e => setApiData({ ...apiData, model: e.target.value })} />
+                                <input
+                                    type="text"
+                                    placeholder="https://api.openai.com/v1  (or Ollama: http://localhost:11434/v1)"
+                                    value={localApiData.base_url || ''}
+                                    onChange={e => setLocalApiData(p => ({ ...p, base_url: e.target.value }))}
+                                />
                             </div>
                             <div className="field-group">
                                 <label>API Key</label>
-                                <input type="password" placeholder="sk-..." value={apiData.api_key || ''} onChange={e => setApiData({ ...apiData, api_key: e.target.value })} />
+                                <input
+                                    type="password"
+                                    placeholder="sk-... (leave blank for Ollama)"
+                                    value={localApiData.api_key || ''}
+                                    onChange={e => setLocalApiData(p => ({ ...p, api_key: e.target.value }))}
+                                />
                             </div>
+                            <div className="field-group">
+                                <label>Model Name</label>
+                                <input
+                                    type="text"
+                                    placeholder="gpt-4o / llama3 / mistral / etc."
+                                    value={localApiData.model || ''}
+                                    onChange={e => setLocalApiData(p => ({ ...p, model: e.target.value }))}
+                                />
+                            </div>
+                        </div>
+                        <div className="provider-grid">
+                            <button className="provider-btn" onClick={() => {
+                                const d = { base_url: 'https://api.openai.com/v1', model: 'gpt-4o' };
+                                setLocalApiData(p => ({ ...p, ...d }));
+                            }}>🤖 OpenAI</button>
+                            <button className="provider-btn" onClick={() => {
+                                const d = { base_url: 'http://localhost:11434/v1', api_key: 'ollama', model: 'llama3' };
+                                setLocalApiData(p => ({ ...p, ...d }));
+                            }}>🦙 Ollama</button>
+                            <button className="provider-btn" onClick={() => {
+                                const d = { base_url: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-20241022' };
+                                setLocalApiData(p => ({ ...p, ...d }));
+                            }}>🌿 Claude</button>
+                            <button className="provider-btn" onClick={() => {
+                                const d = { base_url: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' };
+                                setLocalApiData(p => ({ ...p, ...d }));
+                            }}>⚡ Groq</button>
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+                            <button className="provider-btn" style={{ flex: 1, background: 'var(--accent-blue)', color: '#fff', borderColor: 'var(--accent-blue)' }} onClick={() => {
+                                localStorage.setItem('GGU AI_custom_api', JSON.stringify(localApiData));
+                                setShowSettings(false);
+                            }}>💾 Save & Use</button>
+                            <button className="provider-btn" style={{ flex: 0.5, color: '#ff5252' }} onClick={() => {
+                                localStorage.removeItem('GGU AI_custom_api');
+                                setLocalApiData({});
+                                setShowSettings(false);
+                            }}>🗑 Clear</button>
                         </div>
                     </div>
                 </div>
@@ -211,11 +303,14 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
 
             <div className="chat-messages scrollable" ref={scrollRef}>
                 {messages.map((m, i) => (
-                    <div key={i} className={`chat-msg ${m.role === 'user' ? 'msg-user' : 'msg-agent'}`}>
+                    <div key={i} className={`chat-msg msg-${m.role}`}>
                         <div className="msg-bubble">
                             {m.role === 'agent' && !m.isTyped ? (
                                 <TypeWriter
                                     text={m.content}
+                                    onScroll={() => {
+                                        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+                                    }}
                                     onComplete={() => {
                                         const newMsgs = [...messages];
                                         newMsgs[i].isTyped = true;
@@ -252,13 +347,41 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
                     </div>
                 )}
                 <div className="input-wrap">
+                    {mentionQuery !== null && suggestions.length > 0 && (
+                        <div className="mention-suggestions">
+                            {suggestions.map((s, idx) => (
+                                <div
+                                    key={s}
+                                    className={`mention-item ${idx === mentionIndex ? 'active' : ''}`}
+                                    onClick={() => applyMention(s)}
+                                >
+                                    <span className="file-icon">📄</span>
+                                    <span className="file-path">{s}</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
                     <textarea
+                        id="chat-input-area"
                         rows="1"
-                        placeholder="Ask GGU AI anything..."
+                        placeholder="Ask GGU AI anything (type @ to reference files)..."
                         value={input}
-                        onChange={(e) => setInput(e.target.value)}
+                        onChange={handleInputChange}
                         onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
+                            if (mentionQuery !== null && suggestions.length > 0) {
+                                if (e.key === 'ArrowDown') {
+                                    e.preventDefault();
+                                    setMentionIndex(prev => (prev + 1) % suggestions.length);
+                                } else if (e.key === 'ArrowUp') {
+                                    e.preventDefault();
+                                    setMentionIndex(prev => (prev - 1 + suggestions.length) % suggestions.length);
+                                } else if (e.key === 'Enter' || e.key === 'Tab') {
+                                    e.preventDefault();
+                                    applyMention(suggestions[mentionIndex]);
+                                } else if (e.key === 'Escape') {
+                                    setMentionQuery(null);
+                                }
+                            } else if (e.key === 'Enter' && !e.shiftKey) {
                                 e.preventDefault();
                                 sendMessage();
                             }
@@ -274,7 +397,7 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
     );
 });
 
-function TypeWriter({ text, onComplete, render }) {
+function TypeWriter({ text, onComplete, onScroll, render }) {
     const [displayed, setDisplayed] = useState('');
     const [index, setIndex] = useState(0);
 
@@ -287,12 +410,13 @@ function TypeWriter({ text, onComplete, render }) {
 
                 setDisplayed(prev => prev + text.substring(index, index + nextJump));
                 setIndex(prev => prev + nextJump);
+                if (onScroll) onScroll();
             }, 5);
             return () => clearTimeout(timeout);
         } else {
             onComplete();
         }
-    }, [index, text, onComplete]);
+    }, [index, text, onComplete, onScroll]);
 
     return render(displayed);
 }
@@ -304,18 +428,19 @@ function InteractiveMarkdown({ content, onFileSelect }) {
         <div className="md-container">
             {parts.map((part, i) => {
                 if (part.startsWith('```')) {
-                    const match = part.match(/```(\w*)\n([\s\S]*?)```/);
+                    const match = part.match(/```(\w*)\n?([\s\S]*?)```/);
                     const lang = match ? match[1] : '';
                     const code = match ? (match[2] || '') : part.slice(3, -3);
                     return (
                         <div key={i} className="md-code-block">
                             <div className="code-header"><span>{lang || 'code'}</span></div>
-                            <pre><code>{code.trim()}</code></pre>
+                            <pre><code>{code}</code></pre>
                         </div>
                     );
                 }
                 const lines = part.split('\n');
                 const elements = [];
+                let currentListLines = [];
                 let currentTableLines = [];
 
                 const flushTable = () => {
@@ -325,17 +450,42 @@ function InteractiveMarkdown({ content, onFileSelect }) {
                     }
                 };
 
+                const flushList = () => {
+                    if (currentListLines.length > 0) {
+                        elements.push(
+                            <ul key={`list-${elements.length}`} className="md-ul">
+                                {currentListLines.map((line, idx) => (
+                                    <li key={idx} className="md-li">
+                                        {processSegments(line.trim().replace(/^- /, ''), onFileSelect)}
+                                    </li>
+                                ))}
+                            </ul>
+                        );
+                        currentListLines = [];
+                    }
+                };
+
                 lines.forEach((line, li) => {
-                    const isTableRow = line.trim().startsWith('|') && line.includes('|');
+                    const trimmedLine = line.trim();
+                    const isTableRow = trimmedLine.startsWith('|') && line.includes('|');
+                    const isListItem = trimmedLine.startsWith('- ');
 
                     if (isTableRow) {
+                        flushList();
                         currentTableLines.push(line);
+                    } else if (isListItem) {
+                        flushTable();
+                        currentListLines.push(line);
                     } else {
                         flushTable();
-                        elements.push(renderMarkdownLine(line, li, onFileSelect));
+                        flushList();
+                        if (trimmedLine) {
+                            elements.push(renderMarkdownLine(line, li, onFileSelect));
+                        }
                     }
                 });
                 flushTable();
+                flushList();
 
                 return <div key={i}>{elements}</div>;
             })}
@@ -356,11 +506,25 @@ function processSegments(text, onFileSelect) {
     let m;
     while ((m = citationRegex.exec(processed)) !== null) {
         segments.push(<span key={`t-${segments.length}`} dangerouslySetInnerHTML={{ __html: processed.substring(lastIdx, m.index) }} />);
-        const citeText = m[1];
-        const isFile = citeText.includes('.') || citeText.includes('/');
+        const fullPath = m[1];
+        const isFile = fullPath.includes('.') || fullPath.includes('/');
+
+        // Suppress specific system files like checker.py
+        if (fullPath.includes('checker.py')) {
+            lastIdx = citationRegex.lastIdx;
+            continue;
+        }
+
+        // Extract filename for display (hide the path)
+        const fileName = fullPath.includes('/') ? fullPath.split('/').pop() : fullPath;
+
         segments.push(
-            <span key={`c-${segments.length}`} className={`md-citation ${isFile ? 'md-citation-clickable' : ''}`} onClick={() => isFile && onFileSelect && onFileSelect(citeText)}>
-                {citeText}
+            <span key={`c-${segments.length}`}
+                className={`md-citation ${isFile ? 'md-citation-clickable' : ''}`}
+                onClick={() => isFile && onFileSelect && onFileSelect(fullPath)}
+                title={fullPath}
+            >
+                {fileName}
             </span>
         );
         lastIdx = citationRegex.lastIdx;
@@ -390,7 +554,10 @@ function renderMarkdownLine(line, li, onFileSelect) {
         return <Tag key={li} className={`md-h${headerLevel}`}>{segments}</Tag>;
     }
 
-    if (line.trim().startsWith('- ')) return <li key={li} className="md-li">{segments}</li>;
+    if (line.trim().startsWith('- ')) {
+        const cleanListLine = processed.replace(/^- /, '');
+        return <li key={li} className="md-li">{processSegments(cleanListLine, onFileSelect)}</li>;
+    }
     return <p key={li} className="md-p">{segments}</p>;
 }
 
@@ -429,7 +596,7 @@ function MarkdownTable({ rows, onFileSelect }) {
 }
 
 const STYLES = `
-  .chat-sidebar { width: 340px; background: var(--bg-secondary); border-left: 1px solid var(--border); display: flex; flex-direction: column; height: 100%; position: relative; }
+  .chat-sidebar { width: 100%; background: var(--bg-secondary); border-left: 1px solid var(--border); display: flex; flex-direction: column; height: 100%; position: relative; }
   .chat-header { border-bottom: 1px solid var(--border); background: var(--bg-card); z-index: 10; display: flex; flex-direction: column; }
   .header-row { padding: 8px 12px; display: flex; align-items: center; justify-content: space-between; }
   .header-row.top-row { border-bottom: 1px solid rgba(255,255,255,0.03); }
@@ -474,12 +641,35 @@ const STYLES = `
   .field-group input { background: #000; border: 1px solid var(--border); padding: 8px; border-radius: 4px; font-size: 0.78rem; color: var(--text-primary); width: 100%; transition: border 0.3s; }
   .field-group input:focus { border-color: var(--accent-blue); outline: none; }
 
-  .chat-messages { flex: 1; padding: 12px; display: flex; flex-direction: column; gap: 16px; }
-  .msg-bubble { padding: 12px 16px; border-radius: 12px; font-size: 0.88rem; line-height: 1.6; background: var(--bg-card); border: 1px solid var(--border); position: relative; }
-  .msg-user { align-self: flex-end; }
-  .msg-user .msg-bubble { background: var(--accent-blue); color: #fff; border: none; border-bottom-right-radius: 2px; }
-  .msg-agent { align-self: flex-start; }
-  .msg-agent .msg-bubble { border-bottom-left-radius: 2px; }
+  .chat-messages { flex: 1; padding: 12px; display: flex; flex-direction: column; gap: 16px; overflow-x: hidden; }
+  .msg-bubble { 
+    padding: 12px 16px; 
+    border-radius: 12px; 
+    font-size: 0.88rem; 
+    line-height: 1.6; 
+    background: var(--bg-card); 
+    border: 1px solid var(--border); 
+    position: relative; 
+    max-width: 95%;
+    word-break: break-word;
+    overflow-wrap: break-word;
+    box-sizing: border-box;
+  }
+  .msg-user { align-self: flex-end; width: 100%; }
+  .msg-user .msg-bubble { background: linear-gradient(135deg, #2979ff, #448aff); color: #ffffff; font-weight: 700; border: none; border-bottom-right-radius: 2px; max-width: 100%; padding: 5px 12px; box-shadow: 0 2px 12px rgba(41, 121, 255, 0.5); text-shadow: 0 1px 2px rgba(0,0,0,0.15); }
+  .msg-agent { align-self: flex-start; width: fit-content; max-width: 100%; }
+  .msg-agent .msg-bubble { border-bottom-left-radius: 2px; width: 100%; }
+  
+  .msg-system { align-self: stretch; width: 100%; }
+  .msg-system .msg-bubble { 
+    background: rgba(0,0,0,0.5); 
+    border: 1px dashed var(--accent-cyan); 
+    color: var(--accent-cyan); 
+    font-family: 'JetBrains Mono', monospace; 
+    font-size: 0.75rem;
+    padding: 8px 12px;
+    max-width: 100%;
+  }
 
   .thinking-bubble { display: flex; gap: 4px; padding: 10px 14px; align-items: center; width: fit-content; }
   .dot-loader { width: 6px; height: 6px; background: var(--accent-blue); border-radius: 50%; opacity: 0.4; animation: dotPulse 1.4s infinite ease-in-out; }
@@ -516,15 +706,15 @@ const STYLES = `
   .md-h4 { font-size: 1rem; color: var(--accent-cyan); border-left: 3px solid var(--accent-cyan); padding-left: 8px; margin: 12px 0 6px; }
   .md-h5 { font-size: 0.9rem; color: var(--accent-purple); font-weight: 700; margin: 10px 0 4px; display: flex; align-items: center; gap: 6px; }
   .md-h5::before { content: '◈'; font-size: 0.8rem; }
-  .md-citation { background: rgba(79, 142, 247, 0.1); border: 1px solid rgba(79, 142, 247, 0.2); color: var(--accent-blue); padding: 0 4px; border-radius: 3px; font-size: 0.72rem; }
-  .md-citation-clickable { cursor: pointer; background: rgba(79, 142, 247, 0.2); }
-  .md-citation-clickable:hover { background: var(--accent-blue); color: white; }
+  .md-citation { background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: 500; }
+  .md-citation-clickable { cursor: pointer; background: rgba(79, 142, 247, 0.15); border-color: var(--accent-blue); color: #fff; }
+  .md-citation-clickable:hover { background: var(--accent-blue); color: white; border-color: var(--accent-blue); }
   .md-code-block { margin: 12px 0; background: #08090f; border-radius: 8px; overflow: hidden; border: 1px solid var(--border-bright); }
   .code-header { background: #161822; padding: 6px 12px; font-size: 0.65rem; color: var(--text-muted); border-bottom: 1px solid var(--border); }
   .md-code-block pre { padding: 14px; overflow-x: auto; font-family: 'JetBrains Mono', mono; font-size: 0.82rem; color: #e5e7eb; line-height: 1.5; }
 
   /* Tables */
-  .md-table-wrapper { width: 100%; margin: 16px 0; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); }
+  .md-table-wrapper { width: 100%; margin: 16px 0; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); overflow-x: auto; }
   .md-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   .md-table th { background: #161822; color: var(--accent-cyan); text-align: left; padding: 10px 14px; font-weight: 700; border-bottom: 1.5px solid var(--border-bright); }
   .md-table td { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--text-secondary); line-height: 1.4; }
@@ -541,12 +731,54 @@ const STYLES = `
   .send-btn:disabled { opacity: 0.3; transform: none; }
   .spinner-small { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.2); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; }
 
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  /* Markdown specific styles */
+  .md-p { margin: 8px 0; line-height: 1.6; color: var(--text-secondary); }
+  .md-ul { margin: 10px 0; padding-left: 20px; list-style-type: disc; }
+  .md-li { margin: 6px 0; color: var(--text-secondary); line-height: 1.5; }
+  .md-li::marker { color: var(--accent-blue); }
+
   /* Snippets Preview */
   .snippets-preview { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 4px; }
   .snippet-chip { display: flex; align-items: center; gap: 6px; background: var(--bg-primary); border: 1px solid var(--border-bright); padding: 4px 10px; border-radius: 6px; font-size: 0.72rem; animation: slideIn 0.2s ease-out; box-shadow: 0 2px 5px rgba(0,0,0,0.3); }
   .chip-label { color: var(--accent-cyan); font-weight: 600; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chip-remove { background: transparent; color: var(--text-muted); font-size: 1.1rem; cursor: pointer; line-height: 1; }
   .chip-remove:hover { color: var(--accent-red); }
+
+  /* Mentions */
+  .mention-suggestions {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    right: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--accent-blue);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    box-shadow: 0 -10px 30px rgba(0,0,0,0.5);
+    z-index: 100;
+    overflow: hidden;
+  }
+  .mention-item {
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    transition: var(--transition);
+  }
+  .mention-item:hover, .mention-item.active {
+    background: rgba(79, 142, 247, 0.1);
+    color: var(--text-primary);
+  }
+  .mention-item.active {
+    border-left: 3px solid var(--accent-blue);
+  }
+  .mention-item .file-icon { opacity: 0.6; }
+  .mention-item .file-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   @keyframes slideIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes spin { to { transform: rotate(360deg); } }

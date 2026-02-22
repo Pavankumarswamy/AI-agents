@@ -15,11 +15,13 @@ export default function CodeEditor() {
     const [diffMode, setDiffMode] = useState(false);
     const [showTerminal, setShowTerminal] = useState(true);
     const [terminalHeight, setTerminalHeight] = useState(300);
+    const [chatWidth, setChatWidth] = useState(380);
     const [saving, setSaving] = useState(false);
     const [localValue, setLocalValue] = useState('');
     const lastSyncedPath = useRef(null);
     const debounceTimer = useRef(null);
     const editorRef = useRef(null);
+    const [contextMenu, setContextMenu] = useState(null); // { x, y, path }
 
     // Build a quick lookup: file path → {content, original_content}
     const fileMap = useMemo(() => {
@@ -104,10 +106,10 @@ export default function CodeEditor() {
         }, 1000);
     };
 
-    const defineGGU AITheme = useCallback((monaco) => {
+    const defineGGUAITheme = useCallback((monaco) => {
         if (!monaco) return;
         try {
-            monaco.editor.defineTheme('GGU AI-dark', {
+            monaco.editor.defineTheme('gguai-dark', {
                 base: 'vs-dark',
                 inherit: true,
                 rules: [],
@@ -176,6 +178,25 @@ export default function CodeEditor() {
         document.addEventListener('mouseup', handleMouseUp);
     }, []);
 
+    const startChatResizing = useCallback((mouseDownEvent) => {
+        const startX = mouseDownEvent.clientX;
+        const startWidth = chatWidth;
+
+        const handleMouseMove = (mouseMoveEvent) => {
+            const delta = startX - mouseMoveEvent.clientX;
+            const newWidth = startWidth + delta;
+            setChatWidth(Math.max(250, Math.min(800, newWidth)));
+        };
+
+        const handleMouseUp = () => {
+            document.removeEventListener('mousemove', handleMouseMove);
+            document.removeEventListener('mouseup', handleMouseUp);
+        };
+
+        document.addEventListener('mousemove', handleMouseMove);
+        document.addEventListener('mouseup', handleMouseUp);
+    }, [chatWidth]);
+
     const handleCreate = async (type, parentPath = '') => {
         const name = window.prompt(`Enter ${type} name:`);
         if (!name || !runState.runId) return;
@@ -197,6 +218,37 @@ export default function CodeEditor() {
             alert('Creation failed: ' + (err.response?.data?.detail || err.message));
         }
     };
+
+    const handleDelete = async (path) => {
+        if (!window.confirm(`Are you sure you want to delete ${path}?`)) return;
+        try {
+            const { data } = await axios.post(`${API_BASE}/delete`, {
+                run_id: runState.runId,
+                path: path
+            });
+            setRunState(prev => ({
+                ...prev,
+                live: { ...prev.live, files: data.files }
+            }));
+            if (activePath === path) setActivePath(null);
+            setOpenPaths(prev => prev.filter(p => p !== path));
+        } catch (err) {
+            console.error('Failed to delete item:', err);
+            alert('Deletion failed: ' + (err.response?.data?.detail || err.message));
+        }
+    };
+
+    const handleContextMenu = (e, path) => {
+        e.preventDefault();
+        setContextMenu({ x: e.clientX, y: e.clientY, path });
+    };
+
+
+    useEffect(() => {
+        const handleClick = () => setContextMenu(null);
+        window.addEventListener('click', handleClick);
+        return () => window.removeEventListener('click', handleClick);
+    }, []);
 
     // Group files into a simple tree by directory
     const tree = useMemo(() => {
@@ -226,9 +278,30 @@ export default function CodeEditor() {
                 {files.length === 0 ? (
                     <p className="tree-empty">Files will appear after cloning…</p>
                 ) : (
-                    <TreeNode nodes={tree} fileMap={fileMap} fixedPaths={fixedPaths} selected={activePath} onSelect={handleSelect} onCreation={handleCreate} />
+                    <TreeNode
+                        nodes={tree}
+                        fileMap={fileMap}
+                        fixedPaths={fixedPaths}
+                        selected={activePath}
+                        onSelect={handleSelect}
+                        onCreation={handleCreate}
+                        onContextMenu={handleContextMenu}
+                    />
                 )}
             </div>
+
+            {contextMenu && (
+                <div
+                    className="tree-context-menu"
+                    style={{ top: contextMenu.y, left: contextMenu.x }}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <div className="menu-item menu-item-danger" onClick={() => { handleDelete(contextMenu.path); setContextMenu(null); }}>
+                        🗑️ Delete
+                    </div>
+                </div>
+            )}
+
 
             {/* ── Editor Pane ── */}
             <div className="editor-pane">
@@ -277,18 +350,18 @@ export default function CodeEditor() {
                             original={currentFileData?.original || ''}
                             modified={currentFileData?.content || ''}
                             language={detectLang(activePath)}
-                            theme="GGU AI-dark"
-                            beforeMount={defineGGU AITheme}
+                            theme="gguai-dark"
+                            beforeMount={defineGGUAITheme}
                             options={MONACO_OPTIONS}
                         />
                     ) : (
                         <Editor
                             value={localValue}
                             language={detectLang(activePath)}
-                            theme="GGU AI-dark"
+                            theme="gguai-dark"
                             onChange={handleEditorChange}
                             onMount={handleEditorMount}
-                            beforeMount={defineGGU AITheme}
+                            beforeMount={defineGGUAITheme}
                             options={{ ...MONACO_OPTIONS, readOnly: false }}
                         />
                     )}
@@ -311,10 +384,15 @@ export default function CodeEditor() {
 
             {/* ── Chat Sidebar (Right) ── */}
             {runState.runId && (
-                <ChatSidebar
-                    currentFile={activePath ? { path: activePath, content: currentFileData?.content } : null}
-                    onFileSelect={handleSelect}
-                />
+                <>
+                    <div className="chat-resizer-h" onMouseDown={startChatResizing} />
+                    <div className="chat-sidebar-resizable" style={{ width: chatWidth }}>
+                        <ChatSidebar
+                            currentFile={activePath ? { path: activePath, content: currentFileData?.content } : null}
+                            onFileSelect={handleSelect}
+                        />
+                    </div>
+                </>
             )}
 
             <style>{STYLES}</style>
@@ -491,18 +569,28 @@ function Terminal({ runId, API_BASE, onClose, onFileClick, onSetHeight }) {
 
 
 // ── Tree rendering ────────────────────────────────────────────────────────
-function TreeNode({ nodes, fileMap, fixedPaths, selected, onSelect, onCreation, depth = 0 }) {
+function TreeNode({ nodes, fileMap, fixedPaths, selected, onSelect, onCreation, onContextMenu, depth = 0 }) {
     if (!Array.isArray(nodes)) return null;
     return (
         <div>
             {nodes.map(node => (
-                <TreeItem key={node.path} node={node} fileMap={fileMap} fixedPaths={fixedPaths} selected={selected} onSelect={onSelect} onCreation={onCreation} depth={depth} />
+                <TreeItem
+                    key={node.path}
+                    node={node}
+                    fileMap={fileMap}
+                    fixedPaths={fixedPaths}
+                    selected={selected}
+                    onSelect={onSelect}
+                    onCreation={onCreation}
+                    onContextMenu={onContextMenu}
+                    depth={depth}
+                />
             ))}
         </div>
     );
 }
 
-function TreeItem({ node, fileMap, fixedPaths, selected, onSelect, onCreation, depth }) {
+function TreeItem({ node, fileMap, fixedPaths, selected, onSelect, onCreation, onContextMenu, depth }) {
     const [open, setOpen] = useState(false);
     if (!node) return null;
     const isDir = !!node.children;
@@ -515,6 +603,7 @@ function TreeItem({ node, fileMap, fixedPaths, selected, onSelect, onCreation, d
                 className={`tree-item ${isSel ? 'tree-item-selected' : ''} ${isFixed ? 'tree-item-fixed' : ''} ${depth > 0 ? 'tree-item-nested' : ''}`}
                 style={{ paddingLeft: 10 }}
                 onClick={() => isDir ? setOpen(o => !o) : onSelect(node.path)}
+                onContextMenu={(e) => onContextMenu(e, node.path)}
             >
                 <span className="tree-icon">{isDir ? (open ? '📂' : '📁') : getFileIcon(node.name)}</span>
                 <span className="tree-name">{node.name}</span>
@@ -528,7 +617,16 @@ function TreeItem({ node, fileMap, fixedPaths, selected, onSelect, onCreation, d
             </div>
             {isDir && open && (
                 <div className="tree-children">
-                    <TreeNode nodes={node.children} fileMap={fileMap} fixedPaths={fixedPaths} selected={selected} onSelect={onSelect} onCreation={onCreation} depth={depth + 1} />
+                    <TreeNode
+                        nodes={node.children}
+                        fileMap={fileMap}
+                        fixedPaths={fixedPaths}
+                        selected={selected}
+                        onSelect={onSelect}
+                        onCreation={onCreation}
+                        onContextMenu={onContextMenu}
+                        depth={depth + 1}
+                    />
                 </div>
             )}
         </div>
@@ -646,6 +744,10 @@ const STYLES = `
   .editor-tab:hover .tab-close { opacity: 1; }
   .tab-close:hover { background: rgba(255,255,255,0.1); color: #fff; }
 
+  .chat-resizer-h { width: 4px; cursor: col-resize; background: var(--border); transition: 0.2s; flex-shrink: 0; z-index: 10; }
+  .chat-resizer-h:hover { background: var(--accent-blue); box-shadow: 0 0 10px rgba(79, 142, 247, 0.5); }
+  .chat-sidebar-resizable { display: flex; flex-direction: column; flex-shrink: 0; transition: width 0.05s linear; }
+
   .editor-container { flex: 1; position: relative; overflow: hidden; }
   
   .terminal-resizer { height: 4px; background: var(--border); cursor: ns-resize; transition: 0.2s; flex-shrink: 0; z-index: 10; }
@@ -673,5 +775,33 @@ const STYLES = `
   
   .cmd-body .prompt { color: #ccc !important; margin-right: 4px; }
   .cmd-body input { font-family: 'Consolas', monospace !important; font-size: 1rem !important; }
+
+  /* Context Menu */
+  .tree-context-menu {
+    position: fixed;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-bright);
+    border-radius: 6px;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+    z-index: 1000;
+    min-width: 140px;
+    padding: 4px;
+    animation: fadeIn 0.1s ease-out;
+  }
+  .menu-item {
+    padding: 8px 12px;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .menu-item:hover { background: var(--bg-card); }
+  .menu-item-danger { color: var(--accent-red); }
+  .menu-item-danger:hover { background: rgba(239, 68, 68, 0.1); }
+  .menu-item-disabled { opacity: 0.4; cursor: not-allowed !important; pointer-events: none; }
+  .menu-divider { height: 1px; background: var(--border); margin: 3px 6px; }
 `;
 

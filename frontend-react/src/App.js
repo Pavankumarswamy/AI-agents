@@ -46,6 +46,7 @@ export default function App() {
         error: null,
     });
     const [snippets, setSnippets] = useState([]);
+    const [terminalCwd, setTerminalCwd] = useState(null);
 
     const pollRef = useRef(null);
 
@@ -148,6 +149,57 @@ export default function App() {
         }
     }, [runState.runId, runState.branchName]);
 
+    const loadWorkspace = useCallback(async (runId) => {
+        try {
+            setRunState(s => ({ ...s, status: 'running', runId, result: null, error: null }));
+            const { data: poll } = await axios.get(`${API_BASE}/results/${runId}`);
+            setRunState({
+                runId: runId,
+                status: poll.status,
+                branchName: poll.branch_name || '',
+                repoUrl: poll.repo_url || '',
+                teamName: poll.team_name || '',
+                leaderName: poll.leader_name || '',
+                live: poll.live || { phase: '', message: '', iterations: [], files: [] },
+                result: poll.result || null,
+                error: poll.error || null,
+            });
+            setActiveTab('code');
+        } catch (err) {
+            console.error('Failed to load workspace:', err);
+            setRunState(s => ({ ...s, status: 'failed', error: 'Failed to load workspace.' }));
+        }
+    }, []);
+
+    const manualSave = useCallback(async () => {
+        try {
+            await axios.post(`${API_BASE}/save_all`);
+            alert('✅ Workspaces saved successfully!');
+        } catch (err) {
+            console.error('Save failed:', err);
+            alert('❌ Failed to save workspaces.');
+        }
+    }, []);
+
+    const sendTerminalCommand = useCallback(async (command) => {
+        if (!command || !runState.runId) return { output: '', error: 'No active workspace.', exit_code: 1, cwd: terminalCwd };
+        try {
+            const { data } = await axios.post(`${API_BASE}/terminal`, {
+                run_id: runState.runId,
+                command,
+                cwd: terminalCwd || null,
+            });
+            if (data.cwd) setTerminalCwd(data.cwd);
+            // Refresh live state to pick up the new terminal output
+            const { data: poll } = await axios.get(`${API_BASE}/results/${runState.runId}`).catch(() => ({ data: null }));
+            if (poll) setRunState(s => ({ ...s, live: poll.live || s.live }));
+            return data;
+        } catch (err) {
+            console.error('Terminal command failed:', err);
+            return { output: '', error: err.message, exit_code: 1, cwd: terminalCwd };
+        }
+    }, [runState.runId, terminalCwd, API_BASE]);
+
     // Cleanup on unmount
     useEffect(() => () => clearInterval(pollRef.current), []);
 
@@ -160,9 +212,9 @@ export default function App() {
     ];
 
     const ctx = useMemo(() => ({
-        runState, setRunState, startRun, startLocalRun, downloadFixedCode, API_BASE, configStatus, fetchConfig,
-        snippets, setSnippets
-    }), [runState, startRun, startLocalRun, downloadFixedCode, configStatus, fetchConfig, snippets]);
+        runState, setRunState, startRun, startLocalRun, loadWorkspace, manualSave, downloadFixedCode, API_BASE, configStatus, fetchConfig,
+        snippets, setSnippets, sendTerminalCommand, terminalCwd
+    }), [runState, startRun, startLocalRun, loadWorkspace, manualSave, downloadFixedCode, configStatus, fetchConfig, snippets, sendTerminalCommand, terminalCwd]);
 
     return (
         <AppContext.Provider value={ctx}>
@@ -193,6 +245,9 @@ export default function App() {
                     </nav>
 
                     <div className="header-status">
+                        <button className="tab-btn" onClick={manualSave} style={{ marginRight: 8, background: 'rgba(34, 197, 94, 0.1)', color: '#22c55e' }}>
+                            💾 Save Workspace
+                        </button>
                         <button className="tab-btn" onClick={() => setIsSettingsOpen(true)} style={{ marginRight: 12 }}>
                             ⚙️ Settings
                         </button>

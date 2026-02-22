@@ -1,20 +1,22 @@
 # ⚡ GGU AI 2026 – Autonomous CI/CD Healing Agent
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-1.0.0-blue?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-1.1.0-blue?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/Platform-Windows-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Build-One--Click-orange?style=for-the-badge" alt="Build">
   <img src="https://img.shields.io/badge/UI-Monaco%20Editor-blueviolet?style=for-the-badge" alt="UI">
 </p>
 
+![Dashboard](ui/dashboard.png)
+
 > **Transform CI/CD from a failure point into a self-healing pipeline.**   
->GGU AI 2026 is an autonomous desktop workspace that clones repositories, discovers test failures, generates LLM-powered fixes, and integrates a full developer environment—all in **one single app**.
+> GGU AI 2026 is an autonomous desktop workspace that clones repositories, discovers test failures, generates LLM-powered fixes, and integrates a full developer environment—all in **one single app**.
 
 ---
 
 ## 🚀 The "One-Click" Experience
 
-We have fully unified the stack into a premium Windows application. No more juggling 3 terminals.
+We have fully unified the stack into a premium Windows application. No more juggling terminal windows.
 
 ### 📦 Quick Start: Generate the Integrated App
 Run the automated build script to create your standalone `.exe`:
@@ -26,51 +28,58 @@ Run the automated build script to create your standalone `.exe`:
 2. 🐍 **Python Backend**: Bundles a standalone `backend.exe` via PyInstaller.
 3. 🌐 **Electron Shell**: Packages everything into a single **Setup Installer** and a **Portable EXE**.
 
-**Find your app here:** `electron-app/dist/GGU AI CI-CD Healing Agent Setup 1.0.0.exe`
-
 ---
 
 ## 🔥 Key Features
 
-### 🛠️ Integrated Developer Workspace
-- **Smart Integrated Terminal**: A high-performance terminal that automatically locks into your project directory—works flawlessly for **both Local Folders and GitHub Repositories**.
-- **Monaco Code Editor**: The same engine that powers VS Code. View, edit, and verify AI-applied fixes directly in the app.
-- **Dynamic File Tree**: Navigate your project, create new files, or folders with intuitive controls.
+### 🎙️ LUCA: High-Performance Voice Assistant
+- **Ultra-Low Latency**: Near real-time response (<400ms) with fuzzy-matching cache.
+- **Sarvam AI Integration**: High-quality TTS using the Bulbul v3 model for natural interaction.
+- **Voice Intelligence**: Peak-based silence detection for fluid, uninterrupted conversations.
+
+### 🛠️ Interactive Developer Workspace
+- **Smart Terminal 2.0**: Bidirectional communication with support for interactive inputs (e.g., `flutter run`).
+- **Enhanced UI Controls**: Minimize, maximize, and resizable terminal window with clickable file paths.
+- **Monaco Code Editor**: Professional-grade editor for viewing and editing AI-applied fixes.
+
+![Developer Workspace](ui/code_assistent.png)
 
 ### 🤖 GGU AI Autonomous Agent
-- **Self-Healing Pipeline**: Automatically detects failures, classifies bugs (LINT, SYNTAX, LOGIC), and generates patches.
-- **Autonomous Creator**: Ask the AI in the chat to create new components; it writes the code and saves it directly to your workspace.
-- **Iterative Verification**: The agent doesn't just guess; it runs tests, checks results, and iterates until the code is green.
+- **Self-Healing Pipeline**: Automatically detects failures, classifies bugs, and applies precise patches.
+- **Custom LLM Profiles**: Configure your own LLM settings (OpenAI, NVIDIA, Ollama) directly in the chat header.
+- **TypeWriter UI**: Fluid animation for AI responses with automatic scrolling for long outputs.
+
+![Autonomous Agent](ui/cicd_pipeline.png)
 
 ### 🏗️ Advanced App Infrastructure
-- **Zero-Config Startup**: Automatically initializes your `.env` from templates.
-- **Production-Ready storage**: Uses Windows `AppData` for DB and clones, ensuring it runs perfectly even when installed in restricted folders.
-- **Intelligent Health-Check**: The UI waits for the backend to "wake up" before showing you the dashboard—no more `ECONNREFUSED` errors.
+- **Usage Tracking & Limits**: Built-in monitoring for testing minutes (e.g., 20m/day, 200m total per app) to optimize resources.
+- **Media Playback**: Support for playing audio/video files directly within the workspace.
+- **Admin Management**: Dedicated panel for configuring app assets (like About Us branding).
+
+![Infrastructure](ui/saved-repos.png)
 
 ---
 
 ## 📖 Architecture
 
 ```mermaid
-graph LR
+graph TD
     User([User]) --> UI[GGU AI Dashboard]
     subgraph Integrated App Bundle
-        UI --> Terminal[Integrated Shell]
+        UI --> Terminal[Interactive Shell]
         UI --> Editor[Monaco Editor]
-        UI --> WS[Websocket API]
+        UI --> LUCA[Voice Interaction Engine]
         Launcher[App Launcher] --> Backend[Bundled backend.exe]
     end
     Backend --> Agent[GGU AI Pipeline]
-    Agent --> Docker[Docker Sandbox]
     Agent --> Git[Git Manager]
-    Agent --> LLM((NVIDIA/Ollama))
+    Agent --> LLM((NVIDIA/Ollama/Custom))
+    LUCA --> Sarvam[Sarvam AI API]
 ```
 
 ---
 
 ## 💻 Manual Developer Mode
-
-If you're hacking on the core agents themselves:
 
 **Backend Setup:**
 ```bash
@@ -85,15 +94,6 @@ python run_backend.py
 cd electron-app
 npm install && npm run dev
 ```
-
----
-
-## ⚙️ Configuration (Settings)
-
-Manage your environment via the in-app **Settings** modal:
-- **GITHUB_PAT**: Required for cloning private repos and pushing fixes.
-- **NVIDIA_API_KEY**: Powers the high-precision fix generation.
-- **Ollama**: Connect to local models for offline processing.
 
 ---
 

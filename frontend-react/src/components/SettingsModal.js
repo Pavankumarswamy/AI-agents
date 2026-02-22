@@ -73,61 +73,8 @@ export default function SettingsModal({ isOpen, onClose }) {
                         <p className="field-help">Required for cloning private repos and pushing fixes.</p>
                     </div>
 
-
-
                     <div className="glow-divider" />
-                    <div className="section-label" style={{ marginBottom: 8 }}>Session Custom API (Override)</div>
 
-                    <div className="field-group">
-                        <label className="field-label">Model Endpoint (e.g. OpenAI/Anthropic/Local)</label>
-                        <input
-                            type="text"
-                            placeholder="https://api.openai.com/v1"
-                            value={JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}').base_url || ''}
-                            onChange={(e) => {
-                                const current = JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}');
-                                localStorage.setItem('GGU AI_custom_api', JSON.stringify({ ...current, base_url: e.target.value }));
-                                fetchConfig(); // trigger re-render
-                            }}
-                        />
-                    </div>
-
-                    <div className="field-group">
-                        <label className="field-label">Custom API Key</label>
-                        <input
-                            type="password"
-                            placeholder="sk-xxxxxxxxxxxx"
-                            value={JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}').api_key || ''}
-                            onChange={(e) => {
-                                const current = JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}');
-                                localStorage.setItem('GGU AI_custom_api', JSON.stringify({ ...current, api_key: e.target.value }));
-                                fetchConfig();
-                            }}
-                        />
-                    </div>
-
-                    <div className="field-group">
-                        <label className="field-label">Custom Model Name</label>
-                        <input
-                            type="text"
-                            placeholder="gpt-4o / claude-3-opus"
-                            value={JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}').model || ''}
-                            onChange={(e) => {
-                                const current = JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}');
-                                localStorage.setItem('GGU AI_custom_api', JSON.stringify({ ...current, model: e.target.value }));
-                                fetchConfig();
-                            }}
-                        />
-                    </div>
-
-                    <button
-                        type="button"
-                        className="btn-secondary"
-                        style={{ fontSize: '0.7rem' }}
-                        onClick={() => { localStorage.removeItem('GGU AI_custom_api'); fetchConfig(); }}
-                    >
-                        🗑️ Clear Custom API
-                    </button>
 
                     {message && <div className={`config-message ${message.includes('✅') ? 'success' : 'error'}`}>{message}</div>}
 

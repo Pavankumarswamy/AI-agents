@@ -8,7 +8,7 @@
     "private": true,
     "scripts": {
         "start": "electron .",
-        "dev": "NODE_ENV=development electron .",
+        "dev": "electron .",
         "dist": "electron-builder",
         "pack": "electron-builder --dir"
     },
