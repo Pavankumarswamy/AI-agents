@@ -41,7 +41,7 @@ from llm_client import _call_nvidia, _strip_markdown
 if getattr(sys, 'frozen', False):
     # Running in a bundle (e.g. PyInstaller)
     # Use AppData for writable data in production
-    APP_DATA = Path(os.getenv("APPDATA", os.path.expanduser("~"))) / "PAVAN-CICD-Healing-Agent"
+    APP_DATA = Path(os.getenv("APPDATA", os.path.expanduser("~"))) / "GGU AI-CICD-Healing-Agent"
     APP_DATA.mkdir(parents=True, exist_ok=True)
     
     ROOT_DIR = APP_DATA
@@ -355,7 +355,7 @@ async def chat_with_agent(req: ChatRequest):
 
         if "summary" in msg_lower:
             system_prompt = (
-                "You are PAVAN, an Autonomous CI/CD Healing Agent. "
+                "You are GGU AI, an Autonomous CI/CD Healing Agent. "
                 "Generate a high-level architectural summary of the provided repository context.\n"
                 f"{system_instruction}"
                 "Be sure to cite the main modules using the citation brackets [module_name.py]."
@@ -364,30 +364,30 @@ async def chat_with_agent(req: ChatRequest):
             if not req.file_path or not req.file_content:
                 return {"response": "I can help with that, but I need you to select a file in the editor first!"}
             return {
-                "response": f"Understood. I am deploying my **PAVAN-Heal-Agent** to `{req.file_path}` to address your request.",
+                "response": f"Understood. I am deploying my **GGU AI-Heal-Agent** to `{req.file_path}` to address your request.",
                 "action": "trigger_fix",
                 "metadata": {"file": req.file_path}
             }
         elif any(k in msg_lower for k in ["scan", "find", "tests", "discover"]):
             return {
-                "response": "Starting my **PAVAN-Scan-Agent** to discover relevant files and tests…",
+                "response": "Starting my **GGU AI-Scan-Agent** to discover relevant files and tests…",
                 "action": "trigger_discovery"
             }
         elif any(k in msg_lower for k in ["run", "verify", "execute"]):
             return {
-                "response": "Engaging the **PAVAN-Test-Agent** to execute tests and verify the current state…",
+                "response": "Engaging the **GGU AI-Test-Agent** to execute tests and verify the current state…",
                 "action": "trigger_execution"
             }
         elif any(k in msg_lower for k in ["create", "new file", "new folder", "generate code"]):
             system_prompt = (
-                "You are PAVAN, the Autonomous Creator. Your goal is to help the user build new features by creating files and folders.\n"
+                "You are GGU AI, the Autonomous Creator. Your goal is to help the user build new features by creating files and folders.\n"
                 f"{system_instruction}"
             )
         else:
             system_prompt = (
-                "You are PAVAN, an Autonomous CI/CD Healing Agent. "
+                "You are GGU AI, an Autonomous CI/CD Healing Agent. "
                 "Your goal is to be a helpful workspace companion. "
-                "If the user says 'hi' or greets you, respond conversationally (e.g., 'Hello! I am PAVAN. How can I assist you with your project today?'). "
+                "If the user says 'hi' or greets you, respond conversationally (e.g., 'Hello! I am GGU AI. How can I assist you with your project today?'). "
                 "Otherwise, assist the developer by analyzing their code and explaining logic.\n"
                 f"{system_instruction}"
             )
@@ -860,3 +860,4 @@ async def download_fixed_code(run_id: str):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
+

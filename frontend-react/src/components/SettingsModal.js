@@ -83,10 +83,10 @@ export default function SettingsModal({ isOpen, onClose }) {
                         <input
                             type="text"
                             placeholder="https://api.openai.com/v1"
-                            value={JSON.parse(localStorage.getItem('rift_custom_api') || '{}').base_url || ''}
+                            value={JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}').base_url || ''}
                             onChange={(e) => {
-                                const current = JSON.parse(localStorage.getItem('rift_custom_api') || '{}');
-                                localStorage.setItem('rift_custom_api', JSON.stringify({ ...current, base_url: e.target.value }));
+                                const current = JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}');
+                                localStorage.setItem('GGU AI_custom_api', JSON.stringify({ ...current, base_url: e.target.value }));
                                 fetchConfig(); // trigger re-render
                             }}
                         />
@@ -97,10 +97,10 @@ export default function SettingsModal({ isOpen, onClose }) {
                         <input
                             type="password"
                             placeholder="sk-xxxxxxxxxxxx"
-                            value={JSON.parse(localStorage.getItem('rift_custom_api') || '{}').api_key || ''}
+                            value={JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}').api_key || ''}
                             onChange={(e) => {
-                                const current = JSON.parse(localStorage.getItem('rift_custom_api') || '{}');
-                                localStorage.setItem('rift_custom_api', JSON.stringify({ ...current, api_key: e.target.value }));
+                                const current = JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}');
+                                localStorage.setItem('GGU AI_custom_api', JSON.stringify({ ...current, api_key: e.target.value }));
                                 fetchConfig();
                             }}
                         />
@@ -111,10 +111,10 @@ export default function SettingsModal({ isOpen, onClose }) {
                         <input
                             type="text"
                             placeholder="gpt-4o / claude-3-opus"
-                            value={JSON.parse(localStorage.getItem('rift_custom_api') || '{}').model || ''}
+                            value={JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}').model || ''}
                             onChange={(e) => {
-                                const current = JSON.parse(localStorage.getItem('rift_custom_api') || '{}');
-                                localStorage.setItem('rift_custom_api', JSON.stringify({ ...current, model: e.target.value }));
+                                const current = JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}');
+                                localStorage.setItem('GGU AI_custom_api', JSON.stringify({ ...current, model: e.target.value }));
                                 fetchConfig();
                             }}
                         />
@@ -124,7 +124,7 @@ export default function SettingsModal({ isOpen, onClose }) {
                         type="button"
                         className="btn-secondary"
                         style={{ fontSize: '0.7rem' }}
-                        onClick={() => { localStorage.removeItem('rift_custom_api'); fetchConfig(); }}
+                        onClick={() => { localStorage.removeItem('GGU AI_custom_api'); fetchConfig(); }}
                     >
                         🗑️ Clear Custom API
                     </button>
@@ -196,3 +196,4 @@ const MODAL_STYLES = `
   .config-message.success { background: rgba(16, 185, 129, 0.1); color: #10b981; }
   .config-message.error { background: rgba(239, 68, 68, 0.1); color: #ef4444; }
 `;
+

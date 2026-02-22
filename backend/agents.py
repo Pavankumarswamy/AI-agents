@@ -2,11 +2,11 @@
 agents.py – Multi-agent CI/CD Healing Pipeline
 
 Architecture (sequential phases with concurrent test execution):
-  1. PAVAN-Scan-Agent   – find all test files in the cloned repo
-  2. PAVAN-Test-Agent   – run tests in parallel (concurrent.futures + Docker/subprocess)
-  3. PAVAN-Diagnosis-Agent   – classify failures by bug type
-  4. PAVAN-Heal-Agent         – call LLM to generate and apply patches
-  5. PAVAN-Verification-Agent – commit, push, poll GitHub CI status (up to 5 retries)
+  1. GGU AI-Scan-Agent   – find all test files in the cloned repo
+  2. GGU AI-Test-Agent   – run tests in parallel (concurrent.futures + Docker/subprocess)
+  3. GGU AI-Diagnosis-Agent   – classify failures by bug type
+  4. GGU AI-Heal-Agent         – call LLM to generate and apply patches
+  5. GGU AI-Verification-Agent – commit, push, poll GitHub CI status (up to 5 retries)
 
 The shared `runs` dict is updated throughout for live frontend polling.
 """
@@ -354,7 +354,7 @@ def _apply_fix(repo_dir: str, failure: dict, iteration: int, project_context: st
         "status": "failed",
         "sha": None,
         "iteration": iteration,
-        "agent": "PAVAN-Heal-Agent",
+        "agent": "GGU AI-Heal-Agent",
     }
 
     if not full_path.exists():
@@ -464,3 +464,4 @@ def _build_empty_result(run_id, repo_url, team_name, leader_name, branch_name, s
         commit_count=0,
         output_dir=output_dir,
     )
+

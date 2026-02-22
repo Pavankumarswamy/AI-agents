@@ -10,7 +10,7 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
     const [input, setInput] = useState('');
     const [showConfig, setShowConfig] = useState(false);
     const [apiData, setApiData] = useState(() => {
-        return JSON.parse(localStorage.getItem('rift_custom_api') || '{}');
+        return JSON.parse(localStorage.getItem('GGU AI_custom_api') || '{}');
     });
 
     const [messages, setMessages] = useState([]);
@@ -30,7 +30,7 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
 
     useEffect(() => {
         const fetchHistory = async () => {
-            const welcomeMsg = { role: 'agent', content: 'Hello! I am **PAVAN**. I can help you fix bugs, explain code, or run scans. How can I help today? ⚡', isTyped: true };
+            const welcomeMsg = { role: 'agent', content: 'Hello! I am **GGU AI**. I can help you fix bugs, explain code, or run scans. How can I help today? ⚡', isTyped: true };
 
             if (!runState.runId) {
                 setMessages([welcomeMsg]);
@@ -59,7 +59,7 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
     }, [runState.runId, sessionId, API_BASE]);
 
     useEffect(() => {
-        localStorage.setItem('rift_custom_api', JSON.stringify(apiData));
+        localStorage.setItem('GGU AI_custom_api', JSON.stringify(apiData));
     }, [apiData]);
 
     const sendMessage = async () => {
@@ -135,7 +135,7 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
                             <div className="agent-avatar pulse-slow">
                                 <span className="avatar-icon">💬</span>
                             </div>
-                            <span className="agent-name">PAVAN</span>
+                            <span className="agent-name">GGU AI</span>
                         </div>
                     </div>
 
@@ -254,7 +254,7 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
                 <div className="input-wrap">
                     <textarea
                         rows="1"
-                        placeholder="Ask PAVAN anything..."
+                        placeholder="Ask GGU AI anything..."
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         onKeyDown={(e) => {
@@ -553,3 +553,4 @@ const STYLES = `
 `;
 
 export default ChatSidebar;
+

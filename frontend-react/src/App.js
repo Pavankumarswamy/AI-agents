@@ -171,7 +171,7 @@ export default function App() {
                 <header className="app-header">
                     <div className="app-header-logo">
                         <span className="logo-icon">⚡</span>
-                        <span className="logo-text">RIFT <span className="logo-year">2026</span></span>
+                        <span className="logo-text">GGU AI <span className="logo-year">2026</span></span>
                         <span className="logo-sub">Autonomous CI/CD Healing Agent</span>
                     </div>
 
@@ -385,3 +385,4 @@ const APP_STYLES = `
   .empty-state h2 { color: var(--text-primary); }
   .empty-state p  { max-width: 360px; line-height: 1.7; }
 `;
+

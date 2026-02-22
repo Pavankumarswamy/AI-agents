@@ -104,10 +104,10 @@ export default function CodeEditor() {
         }, 1000);
     };
 
-    const defineRiftTheme = useCallback((monaco) => {
+    const defineGGU AITheme = useCallback((monaco) => {
         if (!monaco) return;
         try {
-            monaco.editor.defineTheme('rift-dark', {
+            monaco.editor.defineTheme('GGU AI-dark', {
                 base: 'vs-dark',
                 inherit: true,
                 rules: [],
@@ -137,10 +137,10 @@ export default function CodeEditor() {
             }
         });
 
-        // Add 'Send to PAVAN' Context Menu Action
+        // Add 'Send to GGU AI' Context Menu Action
         editor.addAction({
-            id: 'send-to-pavan',
-            label: 'Send to PAVAN',
+            id: 'send-to-GGU AI',
+            label: 'Send to GGU AI',
             contextMenuOrder: 1,
             contextMenuGroupId: 'navigation',
             run: (ed) => {
@@ -277,18 +277,18 @@ export default function CodeEditor() {
                             original={currentFileData?.original || ''}
                             modified={currentFileData?.content || ''}
                             language={detectLang(activePath)}
-                            theme="rift-dark"
-                            beforeMount={defineRiftTheme}
+                            theme="GGU AI-dark"
+                            beforeMount={defineGGU AITheme}
                             options={MONACO_OPTIONS}
                         />
                     ) : (
                         <Editor
                             value={localValue}
                             language={detectLang(activePath)}
-                            theme="rift-dark"
+                            theme="GGU AI-dark"
                             onChange={handleEditorChange}
                             onMount={handleEditorMount}
-                            beforeMount={defineRiftTheme}
+                            beforeMount={defineGGU AITheme}
                             options={{ ...MONACO_OPTIONS, readOnly: false }}
                         />
                     )}
@@ -330,7 +330,7 @@ function Terminal({ runId, API_BASE, onClose, onFileClick, onSetHeight }) {
     ]);
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
-    const [cwd, setCwd] = useState('C:\\RIFT\\workspace');
+    const [cwd, setCwd] = useState('C:\\GGU AI\\workspace');
     const scrollRef = useRef(null);
     const socketRef = useRef(null);
 
@@ -478,7 +478,7 @@ function Terminal({ runId, API_BASE, onClose, onFileClick, onSetHeight }) {
                         />
                     </div>
                 )}
-                {socketStatus === 'connecting' && <div className="terminal-line line-info pulse">Re-connecting to RIFT Shell...</div>}
+                {socketStatus === 'connecting' && <div className="terminal-line line-info pulse">Re-connecting to GGU AI Shell...</div>}
                 {socketStatus === 'closed' && (
                     <div className="terminal-line line-error">
                         Connection Lost. <button className="btn-mini" onClick={connect}>Retry Now</button>
@@ -674,3 +674,4 @@ const STYLES = `
   .cmd-body .prompt { color: #ccc !important; margin-right: 4px; }
   .cmd-body input { font-family: 'Consolas', monospace !important; font-size: 1rem !important; }
 `;
+

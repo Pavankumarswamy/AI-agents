@@ -1,4 +1,4 @@
-# ⚡ RIFT 2026 – Autonomous CI/CD Healing Agent
+# ⚡ GGU AI 2026 – Autonomous CI/CD Healing Agent
 
 <p align="center">
   <img src="https://img.shields.io/badge/Version-1.0.0-blue?style=for-the-badge" alt="Version">
@@ -8,7 +8,7 @@
 </p>
 
 > **Transform CI/CD from a failure point into a self-healing pipeline.**   
->AI Agents 2026 is an autonomous desktop workspace that clones repositories, discovers test failures, generates LLM-powered fixes, and integrates a full developer environment—all in **one single app**.
+>GGU AI 2026 is an autonomous desktop workspace that clones repositories, discovers test failures, generates LLM-powered fixes, and integrates a full developer environment—all in **one single app**.
 
 ---
 
@@ -26,7 +26,7 @@ Run the automated build script to create your standalone `.exe`:
 2. 🐍 **Python Backend**: Bundles a standalone `backend.exe` via PyInstaller.
 3. 🌐 **Electron Shell**: Packages everything into a single **Setup Installer** and a **Portable EXE**.
 
-**Find your app here:** `electron-app/dist/RIFT CI-CD Healing Agent Setup 1.0.0.exe`
+**Find your app here:** `electron-app/dist/GGU AI CI-CD Healing Agent Setup 1.0.0.exe`
 
 ---
 
@@ -37,7 +37,7 @@ Run the automated build script to create your standalone `.exe`:
 - **Monaco Code Editor**: The same engine that powers VS Code. View, edit, and verify AI-applied fixes directly in the app.
 - **Dynamic File Tree**: Navigate your project, create new files, or folders with intuitive controls.
 
-### 🤖 PAVAN Autonomous Agent
+### 🤖 GGU AI Autonomous Agent
 - **Self-Healing Pipeline**: Automatically detects failures, classifies bugs (LINT, SYNTAX, LOGIC), and generates patches.
 - **Autonomous Creator**: Ask the AI in the chat to create new components; it writes the code and saves it directly to your workspace.
 - **Iterative Verification**: The agent doesn't just guess; it runs tests, checks results, and iterates until the code is green.
@@ -53,14 +53,14 @@ Run the automated build script to create your standalone `.exe`:
 
 ```mermaid
 graph LR
-    User([User]) --> UI[RIFT Dashboard]
+    User([User]) --> UI[GGU AI Dashboard]
     subgraph Integrated App Bundle
         UI --> Terminal[Integrated Shell]
         UI --> Editor[Monaco Editor]
         UI --> WS[Websocket API]
         Launcher[App Launcher] --> Backend[Bundled backend.exe]
     end
-    Backend --> Agent[PAVAN Pipeline]
+    Backend --> Agent[GGU AI Pipeline]
     Agent --> Docker[Docker Sandbox]
     Agent --> Git[Git Manager]
     Agent --> LLM((NVIDIA/Ollama))
@@ -97,14 +97,15 @@ Manage your environment via the in-app **Settings** modal:
 
 ---
 
-## 🏆 Team RIFT 
+## 🏆 Team GGU AI 
 
 | Member | Focus |
 | :--- | :--- |
 | **Saiyam Kumar** | Team Leader & Integration Architect |
-| **RIFT ORGANISERS** | Autonomous Agent Development |
+| **GGU AI ORGANISERS** | Autonomous Agent Development |
 
 ---
 
 ## 📜 License
-Distributed under the MIT License. © 2026 RIFT ORGANISERS.
+Distributed under the MIT License. © 2026 GGU AI ORGANISERS.
+
