@@ -23,6 +23,7 @@ import sqlite3
 import json
 import asyncio
 import subprocess
+import platform
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -98,7 +99,14 @@ def save_projects():
     try:
         data = {
             "RUN_PATHS": {k: str(v) for k, v in RUN_PATHS.items()},
-            "TERMINAL_HISTORY": {k: v["live"].get("terminal_output", "") for k, v in runs.items() if "live" in v}
+            "RUN_META": {
+                k: {
+                    "team_name": v.get("team_name"),
+                    "leader_name": v.get("leader_name"),
+                    "status": v.get("status"),
+                    "terminal_output": v.get("live", {}).get("terminal_output", ""),
+                } for k, v in runs.items()
+            }
         }
         PROJECTS_FILE.write_text(json.dumps(data), encoding="utf-8")
     except Exception as e:
@@ -108,20 +116,33 @@ def load_projects():
     if PROJECTS_FILE.exists():
         try:
             data = json.loads(PROJECTS_FILE.read_text(encoding="utf-8"))
-            for k, v in data.get("RUN_PATHS", {}).items():
+            # Load paths first
+            saved_paths = data.get("RUN_PATHS", {})
+            for k, v in saved_paths.items():
                 RUN_PATHS[k] = Path(v)
-            for k, v in data.get("TERMINAL_HISTORY", {}).items():
-                if k not in runs:
-                    runs[k] = {
-                        "status": "completed",
-                        "live": {
-                            "phase": "done",
-                            "message": "Project restored",
-                            "terminal_output": v,
-                            "files": [],
-                            "iterations": []
-                        }
+            
+            # Load metadata
+            meta = data.get("RUN_META", {})
+            legacy_history = data.get("TERMINAL_HISTORY", {})
+            
+            for k in RUN_PATHS.keys():
+                v = meta.get(k, {})
+                legacy_term = legacy_history.get(k, "")
+                
+                runs[k] = {
+                    "status": v.get("status", "completed"),
+                    "team_name": v.get("team_name") or "GGU AI",
+                    "leader_name": v.get("leader_name") or "AI_PROJECT",
+                    "live": {
+                        "phase": "done",
+                        "message": "Project restored",
+                        "terminal_output": v.get("terminal_output") or legacy_term,
+                        "files": [],
+                        "iterations": []
                     }
+                }
+                # Import chat history from workspace if DB is empty
+                import_chat_history(k, RUN_PATHS[k])
         except Exception as e:
             logger.warning(f"Failed to load projects: {e}")
 
@@ -131,6 +152,10 @@ load_projects()
 # App Initialization
 # ---------------------------------------------------------------------------
 app = FastAPI(title="CI/CD Healing Agent API", version="1.0.0")
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
 app.add_middleware(
     CORSMiddleware,
@@ -176,6 +201,10 @@ class LocalOpenRequest(BaseModel):
 class BrowseFolderRequest(BaseModel):
     path: Optional[str] = None
 
+class DeleteItemRequest(BaseModel):
+    run_id: str
+    path: str
+
 class AnalyzeResponse(BaseModel):
     run_id: str
     message: str
@@ -204,10 +233,67 @@ def get_repo_path(run_id: str) -> Path | None:
         
     try:
         # Check if run_id is a prefix of any directory in CLONES_DIR
-        target = next((item for item in CLONES_DIR.iterdir() if item.is_dir() and item.name.split('_')[0] == run_id), None)
-        return target
+        for item in CLONES_DIR.iterdir():
+            if item.is_dir():
+                prefix = item.name.split('_')[0]
+                if prefix == run_id:
+                    return item
+        return None
     except Exception:
         return None
+
+def add_chat_message(run_id: str, session_id: str, role: str, content: str):
+    """Save a chat message to both the central DB and the workspace-specific history file."""
+    try:
+        # 1. Central SQLite DB
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("INSERT INTO chat_messages (run_id, session_id, role, content) VALUES (?, ?, ?, ?)",
+                    (run_id, session_id, role, content))
+        conn.commit()
+        conn.close()
+
+        # 2. Workspace-specific JSON file (mirror)
+        repo_path = get_repo_path(run_id)
+        if repo_path and repo_path.exists():
+            history_dir = repo_path / ".gguai"
+            history_dir.mkdir(exist_ok=True)
+            history_file = history_dir / "chat_history.json"
+            
+            history = []
+            if history_file.exists():
+                try:
+                    history = json.loads(history_file.read_text(encoding="utf-8"))
+                except: pass
+            
+            history.append({
+                "role": role,
+                "content": content,
+                "session_id": session_id,
+                "timestamp": datetime.now().isoformat()
+            })
+            history_file.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Failed to add chat message for {run_id}: {e}")
+
+def import_chat_history(run_id: str, repo_path: Path):
+    """Try to import chat history from the workspace folder if empty in the central DB."""
+    history_file = repo_path / ".gguai" / "chat_history.json"
+    if not history_file.exists(): return
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT count(*) FROM chat_messages WHERE run_id = ?", (run_id,))
+        if c.fetchone()[0] == 0:
+            history = json.loads(history_file.read_text(encoding="utf-8"))
+            for msg in history:
+                c.execute("INSERT INTO chat_messages (run_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+                            (run_id, msg.get("session_id", "default"), msg["role"], msg["content"], msg.get("timestamp")))
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Import history failed for {run_id}: {e}")
 
 def derive_branch_name(team_name: str, leader_name: str) -> str:
     import re
@@ -234,6 +320,8 @@ def _background_run(run_id: str, repo_url: str, team_name: str, leader_name: str
         logger.exception(f"[{run_id}] Pipeline failed: {exc}")
         runs[run_id]["status"] = "failed"
         runs[run_id]["error"] = str(exc)
+    finally:
+        save_projects()
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -248,6 +336,8 @@ async def analyze(req: AnalyzeRequest):
 
     runs[run_id] = {
         "status": "running",
+        "team_name": req.team_name,
+        "leader_name": req.leader_name,
         "live": {
             "phase": "initializing",
             "message": "Starting pipeline...",
@@ -280,6 +370,8 @@ async def open_local_folder(req: LocalOpenRequest):
         
         runs[run_id] = {
             "status": "completed",
+            "team_name": req.team_name,
+            "leader_name": req.leader_name,
             "live": {
                 "phase": "done",
                 "message": f"Local project mounted: {path.name}",
@@ -340,55 +432,51 @@ async def browse_local_folders(req: BrowseFolderRequest):
 async def chat_with_agent(req: ChatRequest):
     try:
         msg_lower = req.message.lower()
+        current_os = platform.system()
+        is_windows = (current_os == "Windows")
+        
         system_instruction = (
+            f"You are GGU AI, a world-class Autonomous CI/CD Healing Agent. Current OS: {current_os}\n\n"
             "ALWAYS use the following Markdown patterns for premium display:\n"
             "1. Use `#### Header Name` for important section titles (this triggers larger fonts).\n"
             "2. Use `[File.py]` or `[Citation]` brackets to cite specific source files or points.\n"
             "3. Use **Tables** and **Numbered Lists** whenever appropriate.\n\n"
-            "--- AUTONOMOUS CREATION PROTOCOL ---\n"
-            "If you need to create or modify a file, you MUST end your response with this EXACT block for EACH file:\n"
-            "CREATE_FILE: path/to/file.ext\n"
-            "```\ncontent here\n```\n"
-            "DO NOT just describe the files. You MUST use the block above to actually write them to disk. "
-            "This applies to ANY file generation request.\n"
+            "--- AUTONOMOUS ACTION PROTOCOL ---\n"
+            "You have full access to the project workspace. You can create/modify files or execute terminal commands.\n\n"
+            "1. **TO CREATE/MODIFY FILES**:\n"
+            "   CREATE_FILE: path/to/file.ext\n"
+            "   ```\n   content\n   ```\n\n"
+            "2. **TO EXECUTE TERMINAL COMMANDS**:\n"
+            "   Use this to list directories, run tests, or check environment state:\n"
+            "   RUN_COMMAND: your_command_here\n\n"
+            f"   NOTE: You are running on {current_os}. " + 
+            ("On Windows, use PowerShell-compatible commands (e.g., `Get-ChildItem` instead of `ls`)." if is_windows else "Use standard POSIX commands.") + "\n\n"
+            "   After you issue a `RUN_COMMAND`, you MUST STOP your response immediately. DO NOT imagine or hallucinate the output. The system will provide the real output in the next turn.\n\n"
+            "3. **ITERATIVE REASONING**:\n"
+            "   If a command fails, analyze the error and try a different approach. DO NOT give up immediately.\n\n"
+            "4. **TO FINISH**:\n"
+            "   When you have completed the task or have a final answer, provide a comprehensive summary starting with `#### Final Summary`.\n\n"
+            "Think step-by-step: Plan -> Act (STOP) -> Observe Output -> Refine -> Complete.\n"
         )
 
         if "summary" in msg_lower:
-            system_prompt = (
+            system_instruction = (
                 "You are GGU AI, an Autonomous CI/CD Healing Agent. "
                 "Generate a high-level architectural summary of the provided repository context.\n"
                 f"{system_instruction}"
                 "Be sure to cite the main modules using the citation brackets [module_name.py]."
             )
-        elif any(k in msg_lower for k in ["fix", "correct", "logic", "unused", "syntax"]):
-            if not req.file_path or not req.file_content:
-                return {"response": "I can help with that, but I need you to select a file in the editor first!"}
-            return {
-                "response": f"Understood. I am deploying my **GGU AI-Heal-Agent** to `{req.file_path}` to address your request.",
-                "action": "trigger_fix",
-                "metadata": {"file": req.file_path}
-            }
-        elif any(k in msg_lower for k in ["scan", "find", "tests", "discover"]):
-            return {
-                "response": "Starting my **GGU AI-Scan-Agent** to discover relevant files and tests…",
-                "action": "trigger_discovery"
-            }
-        elif any(k in msg_lower for k in ["run", "verify", "execute"]):
-            return {
-                "response": "Engaging the **GGU AI-Test-Agent** to execute tests and verify the current state…",
-                "action": "trigger_execution"
-            }
         elif any(k in msg_lower for k in ["create", "new file", "new folder", "generate code"]):
-            system_prompt = (
+            system_instruction = (
                 "You are GGU AI, the Autonomous Creator. Your goal is to help the user build new features by creating files and folders.\n"
                 f"{system_instruction}"
             )
         else:
-            system_prompt = (
-                "You are GGU AI, an Autonomous CI/CD Healing Agent. "
-                "Your goal is to be a helpful workspace companion. "
-                "If the user says 'hi' or greets you, respond conversationally (e.g., 'Hello! I am GGU AI. How can I assist you with your project today?'). "
-                "Otherwise, assist the developer by analyzing their code and explaining logic.\n"
+            system_instruction = (
+                "You are **GGU AI**, a high-performance Autonomous CI/CD Healing Agent. "
+                "Maintain your identity as a professional workspace companion. "
+                "If the user greets you or asks who you are, prioritize a helpful, conversational response about your capabilities (bug fixing, scanning, test execution). "
+                "Do NOT just output code snippets from the context unless specifically asked to fix or explain them.\n\n"
                 f"{system_instruction}"
             )
 
@@ -408,74 +496,176 @@ async def chat_with_agent(req: ChatRequest):
             context_parts.append(f"### CURRENT ACTIVE FILE (`{req.file_path}`)\n```\n{req.file_content}\n```")
 
         full_requested = any(k in msg_lower for k in ["full code", "entire repo", "all files", "architecture summary", "project overview"])
+        
+        # Explicitly look for [path] patterns from @ mentions
+        import re
+        mentions = re.findall(r"\[([a-zA-Z0-9_/.-]+)\]", req.message)
+        
         if repo_files:
             for f in repo_files:
                 path, content = f.get("path"), f.get("content", "")
-                if not path or not content or path == req.file_path: continue
-                if full_requested or (path.lower() in msg_lower or path.split("/")[-1].lower() in msg_lower):
+                if not path or not content: continue
+                
+                # Check if this file is explicitly mentioned
+                is_mentioned = any(m.lower() in path.lower() for m in mentions)
+                
+                # Or implicitly mentioned by name
+                is_implicit = not mentions and (path.lower() in msg_lower or path.split("/")[-1].lower() in msg_lower)
+
+                if full_requested or is_mentioned or is_implicit:
+                    # Avoid duplication if it's already the active file
+                    if path == req.file_path: continue
                     context_parts.append(f"### REFERENCED FILE: `{path}`\n```\n{content}\n```")
-                    if len(context_parts) > 10: break
+                    if len(context_parts) > 12: break
 
         context_str = "\n\n" + "\n\n".join(context_parts) if context_parts else "\n\n(No project context available.)"
 
-        # LLM Logic
-        messages = [{"role": "system", "content": f"{system_prompt}\n\n{context_str}"}]
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("INSERT INTO chat_messages (run_id, session_id, role, content) VALUES (?, ?, ?, ?)",
-                      (req.run_id or "unknown", req.session_id or "default", "user", req.message))
-            c.execute("SELECT role, content FROM chat_messages WHERE run_id = ? AND session_id = ? ORDER BY timestamp DESC LIMIT 10",
-                      (req.run_id or "unknown", req.session_id or "default"))
-            history_rows = c.fetchall()
-            history_rows.reverse()
-            for h in history_rows:
-                role = "assistant" if h[0] == "agent" else h[0]
-                messages.append({"role": role, "content": h[1]})
-            
-            response = _call_nvidia(messages, api_data=req.api_data)
-            stripped = _strip_markdown(response)
-            
-            c.execute("INSERT INTO chat_messages (run_id, session_id, role, content) VALUES (?, ?, ?, ?)",
-                      (req.run_id or "unknown", req.session_id or "default", "agent", stripped))
-            conn.commit()
-            conn.close()
-        except Exception as db_err:
-            logger.error(f"DB error during chat: {db_err}")
-            response = _call_nvidia([{"role": "user", "content": f"{system_prompt}\n\n{context_str}\n\n{req.message}"}], api_data=req.api_data)
-            stripped = _strip_markdown(response)
+        # LLM Logic with iterative tool use
+        max_iterations = 5
+        iteration = 0
+        final_response = ""
+        last_tool_output = ""
 
-        # Autonomous Creation logic
-        import re
-        # Improved pattern: Handles optional spaces and multiple newlines
-        creation_pattern = r"(?:CREATE_FILE:|WRITE_FILE:)\s*([^\s\n]+)\s*\n*```(?:\w+)?\n(.*?)\n```"
-        matches = list(re.finditer(creation_pattern, response, re.DOTALL))
-        updated_live = None
-        
-        if matches and req.run_id:
-            repo_path = get_repo_path(req.run_id)
+        while iteration < max_iterations:
+            iteration += 1
             
-            if repo_path:
-
-                for match in matches:
-                    target, content = match.group(1).strip(), match.group(2)
-                    full_p = (repo_path / target).resolve()
-                    if str(full_p).startswith(str(repo_path.resolve())):
-                        full_p.parent.mkdir(parents=True, exist_ok=True)
-                        full_p.write_text(content, encoding="utf-8")
-                        logger.info(f"[CREATE] Created: {target}")
+            # Prepare messages for this turn
+            current_messages = [{"role": "system", "content": f"{system_instruction}\n\n{context_str}"}]
+            
+            # Get history (for the first turn, we add the user message)
+            try:
+                if iteration == 1:
+                    add_chat_message(req.run_id or "unknown", req.session_id or "default", "user", req.message)
                 
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("SELECT role, content FROM chat_messages WHERE run_id = ? AND session_id = ? ORDER BY timestamp DESC LIMIT 15",
+                          (req.run_id or "unknown", req.session_id or "default"))
+                history_rows = c.fetchall()
+                history_rows.reverse()
+                for h in history_rows:
+                    # Role mapping for LLM alternating roles (user/assistant)
+                    # agent -> assistant
+                    # user/system -> user
+                    if h[0] == "agent":
+                        role = "assistant"
+                        content = h[1]
+                    else:
+                        role = "user"
+                        # If it's a system message, prefix it for context so agent knows it's tool output
+                        content = f"[SYSTEM: {h[1]}]" if h[0] == "system" else h[1]
+                    
+                    current_messages.append({"role": role, "content": content})
+                conn.close()
+                
+                # Cleanup: Ensure strictly alternating user/assistant roles
+                deduped = []
+                for m in current_messages:
+                    if deduped and deduped[-1]["role"] == m["role"]:
+                        # Merge content if roles are identical
+                        deduped[-1]["content"] += "\n\n" + m["content"]
+                    else:
+                        deduped.append(m)
+                
+                # The API requires history to start with 'user' role after system
+                while deduped and deduped[0]["role"] == "assistant":
+                    deduped.pop(0)
+                
+                current_messages = deduped
+            except Exception as db_err:
+                logger.error(f"DB error during chat loop: {db_err}")
+                if iteration == 1:
+                    current_messages.append({"role": "user", "content": req.message})
+
+            # Call LLM
+            response = _call_nvidia(current_messages, api_data=req.api_data)
+            
+            # Persist agent response
+            add_chat_message(req.run_id or "unknown", req.session_id or "default", "agent", response)
+
+            # Accumulate the response
+            if response.strip():
+                final_response += response + "\n\n"
+
+
+            # Check for actions
+            import re
+            
+            # 1. Check for File Creation
+            creation_pattern = r"(?:CREATE_FILE:|WRITE_FILE:)\s*([^\s\n]+)\s*\n*```(?:\w+)?\n(.*?)\n```"
+            matches = list(re.finditer(creation_pattern, response, re.DOTALL))
+            if matches and req.run_id:
+                repo_path = get_repo_path(req.run_id)
+                if repo_path:
+                    for match in matches:
+                        target, content = match.group(1).strip(), match.group(2)
+                        full_p = (repo_path / target).resolve()
+                        if str(full_p).startswith(str(repo_path.resolve())):
+                            full_p.parent.mkdir(parents=True, exist_ok=True)
+                            full_p.write_text(content, encoding="utf-8")
+                            logger.info(f"[CHAT-AGENT] Created: {target}")
+
+            # 2. Check for Terminal Commands
+            command_pattern = r"RUN_COMMAND:\s*(.*)"
+            cmd_match = re.search(command_pattern, response, re.IGNORECASE)
+            
+            if cmd_match and req.run_id:
+                cmd = cmd_match.group(1).strip()
+                # Strip potential trailing markdown characters if agent was sloppy
+                cmd = re.sub(r'[`\s]+$', '', cmd) 
+                repo_path = get_repo_path(req.run_id)
+                if repo_path:
+                    logger.info(f"[CHAT-AGENT] Executing: {cmd}")
+                    try:
+                        # Prepare command based on OS
+                        exec_cmd = cmd
+                        if is_windows:
+                            # Use PowerShell for better compatibility on Windows
+                            exec_cmd = ["powershell", "-NoProfile", "-Command", cmd]
+                        
+                        # Use subprocess to run the command in the repo root
+                        proc = subprocess.run(
+                            exec_cmd,
+                            cwd=repo_path,
+                            shell=not is_windows, # shell=True is problematic with list args on windows if not careful
+                            capture_output=True,
+                            text=True,
+                            timeout=60
+                        )
+                        output = proc.stdout + "\n" + proc.stderr
+                        tool_msg = f"--- TERMINAL OUTPUT ({cmd}) ---\n{output}"
+                        final_response += f"#### 🖥️ Action: `{cmd}`\n```\n{output}\n```\n\n"
+                        
+                        # Save tool output to history
+                        add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", tool_msg)
+                        
+                        # Continue to next iteration to let agent process output
+                        continue
+                    except Exception as e:
+                        err_msg = f"Error executing command: {str(e)}"
+                        add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", err_msg)
+                        continue
+            
+            # If no more commands, break the loop
+            break
+
+        # Final state refresh
+        updated_live = None
+        if req.run_id:
+            repo_path = get_repo_path(req.run_id)
+            if repo_path:
                 from git_utils import get_all_files
                 from git import Repo
                 try:
                     repo_obj = Repo(repo_path)
                     updated_live = get_all_files(repo_obj)
                     runs[req.run_id]["live"]["files"] = updated_live
-                except Exception as e:
-                    logger.error(f"Refresh failed: {e}")
+                except: pass
 
-        payload = {"response": stripped}
+        payload = {"response": final_response.strip()}
         if updated_live: payload["live"] = {"files": updated_live}
+        
+        save_projects() # Persist state after chat actions
         return payload
 
     except Exception as e:
@@ -514,6 +704,26 @@ async def get_chat_sessions(run_id: str):
 async def get_results(run_id: str):
     if run_id not in runs: raise HTTPException(status_code=404, detail="Run not found")
     run = runs[run_id]
+    
+    # If files list is empty, try to refresh it from disk
+    if not run.get("live", {}).get("files"):
+        repo_path = RUN_PATHS.get(run_id)
+        if repo_path and repo_path.exists():
+            from git_utils import get_all_files
+            from git import Repo
+            try:
+                # We handle both real git repos and local folders (MockRepo)
+                try:
+                    repo_obj = Repo(repo_path)
+                except:
+                    class MockRepo:
+                        def __init__(self, p): self.working_dir = str(p)
+                    repo_obj = MockRepo(repo_path)
+                
+                run.setdefault("live", {})["files"] = get_all_files(repo_obj)
+            except Exception as e:
+                logger.warning(f"Auto-refresh files failed for {run_id}: {e}")
+
     return {
         "run_id": run_id,
         "status": run["status"],
@@ -526,6 +736,31 @@ async def get_results(run_id: str):
         "result": run.get("result"),
         "error": run.get("error"),
     }
+
+@app.get("/workspaces")
+async def list_workspaces():
+    """Return a list of all saved project workspaces."""
+    workspace_list = []
+    # Iterate over RUN_PATHS to ensure every saved project is listed
+    for run_id, path in RUN_PATHS.items():
+        data = runs.get(run_id, {})
+        live = data.get("live", {})
+        
+        workspace_list.append({
+            "run_id": run_id,
+            "path": str(path),
+            "status": data.get("status", "completed"),
+            "phase": live.get("phase", "done"),
+            "team_name": data.get("team_name") or "GGU AI",
+            "leader_name": data.get("leader_name") or "AI_PROJECT"
+        })
+    return {"workspaces": workspace_list}
+
+@app.post("/save_all")
+async def manual_save():
+    """Manually trigger project state persistence."""
+    save_projects()
+    return {"status": "success", "message": "Workspaces persisted to disk"}
 
 @app.get("/config")
 async def get_config():
@@ -640,12 +875,34 @@ async def create_item(req: CreateItemRequest):
         return {"message": "Created", "files": updated_live}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/delete")
+async def delete_item(req: DeleteItemRequest):
+    target = get_repo_path(req.run_id)
+    if not target: raise HTTPException(status_code=404, detail="Project path not found")
+    
+    full_p = (target / req.path).resolve()
+    if not str(full_p).startswith(str(target.resolve())): 
+        raise HTTPException(status_code=403, detail="Illegal path traversal attempt")
+        
+    try:
+        if full_p.is_dir():
+            shutil.rmtree(full_p)
+        elif full_p.is_file():
+            full_p.unlink()
+            
+        from git_utils import get_all_files
+        from git import Repo
+        updated_live = get_all_files(Repo(target))
+        if req.run_id in runs: runs[req.run_id]["live"]["files"] = updated_live
+        return {"message": "Deleted", "files": updated_live}
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
 @app.websocket("/ws/terminal/{run_id}")
 async def terminal_websocket(websocket: WebSocket, run_id: str):
-    """Handle real-time terminal command execution and log streaming."""
+    """Handle real-time interactive terminal with stdin support."""
     logger.info(f"[WS] Accepting terminal connection for {run_id}")
     await websocket.accept()
-    
+
     repo_root = get_repo_path(run_id)
     if not repo_root:
         try:
@@ -655,133 +912,208 @@ async def terminal_websocket(websocket: WebSocket, run_id: str):
         return
 
     loop = asyncio.get_running_loop()
-    logger.info(f"[WS] Session active: {run_id} | Loop: {type(loop).__name__}")
-    
-    # Send existing history if any (limited to avoid overflow)
+    logger.info(f"[WS] Session active: {run_id}")
+
+    # Send existing history
     if run_id in runs and "live" in runs[run_id]:
         history = runs[run_id]["live"].get("terminal_output", "")
         if history:
             try: await websocket.send_json({"type": "output", "content": history[-10000:]})
             except: pass
-        
-    try:
+
+    # State for the current interactive process
+    active_process = None
+    output_queue = asyncio.Queue()
+    current_cwd = str(repo_root)
+
+    def pipe_reader(pipe, msg_type):
+        """Read from a pipe and push to output_queue."""
+        try:
+            while True:
+                char = pipe.read(1)
+                if not char:
+                    break
+                loop.call_soon_threadsafe(output_queue.put_nowait, {"type": msg_type, "content": char})
+        except Exception:
+            pass
+
+    async def drain_output():
+        """Drain output_queue and send to websocket."""
+        nonlocal active_process
+        buffer = ""
         while True:
             try:
-                data = await websocket.receive_json()
+                msg = await asyncio.wait_for(output_queue.get(), timeout=0.05)
+                content = msg.get("content", "")
+                buffer += content
+                # Flush on newline or buffer build-up
+                if "\n" in buffer or "\r" in buffer or len(buffer) > 80:
+                    # Save to live state
+                    if run_id in runs:
+                        old = runs[run_id]["live"].get("terminal_output", "")
+                        runs[run_id]["live"]["terminal_output"] = (old + buffer)[-20000:]
+                    try:
+                        await websocket.send_json({"type": msg["type"], "content": buffer})
+                    except Exception:
+                        return
+                    buffer = ""
+            except asyncio.TimeoutError:
+                # Flush any remaining buffer on timeout
+                if buffer:
+                    if run_id in runs:
+                        old = runs[run_id]["live"].get("terminal_output", "")
+                        runs[run_id]["live"]["terminal_output"] = (old + buffer)[-20000:]
+                    try:
+                        await websocket.send_json({"type": "output", "content": buffer})
+                    except Exception:
+                        return
+                    buffer = ""
+                # Check if process ended
+                if active_process and active_process.poll() is not None:
+                    if buffer:
+                        try: await websocket.send_json({"type": "output", "content": buffer})
+                        except: pass
+                    break
+
+    try:
+        while True:
+            # Receive next message from frontend (with timeout to allow drain_output to run)
+            try:
+                receive_task = asyncio.create_task(websocket.receive_json())
+                drain_task = asyncio.create_task(drain_output())
+
+                done, pending = await asyncio.wait(
+                    [receive_task, drain_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                # Cancel pending tasks
+                for t in pending:
+                    t.cancel()
+                    try: await t
+                    except: pass
+
+                if drain_task in done:
+                    # Process ended, notify frontend and wait for next command
+                    if active_process:
+                        exit_code = active_process.wait()
+                        try: await websocket.send_json({"type": "done", "exit_code": exit_code, "cwd": current_cwd})
+                        except: pass
+                        save_projects()
+                        active_process = None
+                    continue
+
+                if receive_task not in done:
+                    continue
+
+                data = receive_task.result()
+
             except WebSocketDisconnect:
                 logger.info(f"[WS] Client disconnected: {run_id}")
+                if active_process and active_process.poll() is None:
+                    active_process.kill()
                 break
             except Exception as e:
                 logger.warning(f"[WS] Receive error: {e}")
                 break
 
-            command = data.get("command")
+            msg_type = data.get("type", "command")
+
+            # ── Handle stdin injection ──────────────────────────────
+            if msg_type == "stdin":
+                stdin_data = data.get("data", "")
+                if active_process and active_process.poll() is None and active_process.stdin:
+                    try:
+                        active_process.stdin.write(stdin_data + "\n")
+                        active_process.stdin.flush()
+                        # Echo input to terminal
+                        if run_id in runs:
+                            old = runs[run_id]["live"].get("terminal_output", "")
+                            runs[run_id]["live"]["terminal_output"] = (old + stdin_data + "\n")[-20000:]
+                        await websocket.send_json({"type": "output", "content": stdin_data + "\n"})
+                    except Exception as e:
+                        await websocket.send_json({"type": "error", "content": f"stdin error: {e}"})
+                else:
+                    await websocket.send_json({"type": "error", "content": "No active process to send input to."})
+                continue
+
+            # ── Handle new command ──────────────────────────────────
+            command = data.get("command", "")
             if not command: continue
-            
-            cwd = data.get("cwd") or str(repo_root)
+
+            cwd = data.get("cwd") or current_cwd
 
             # Resolve start_dir
-            if not cwd:
-                start_dir = repo_root
-            else:
-                try:
-                    start_dir = Path(cwd)
-                    if not str(start_dir.resolve()).startswith(str(repo_root.resolve())):
-                        start_dir = repo_root
-                except Exception:
+            try:
+                start_dir = Path(cwd)
+                if not str(start_dir.resolve()).startswith(str(repo_root.resolve())):
                     start_dir = repo_root
+            except Exception:
+                start_dir = repo_root
 
-            # Chain to capture new CWD after command
-            # Force UTF-8 on Windows
-            chained_cmd = f"chcp 65001 >nul & cd /d \"{start_dir}\" & {command} & echo --END_OF_COMMAND-- & cd"
-            
-            queue = asyncio.Queue()
-            loop = asyncio.get_event_loop()
+            # Kill any existing process
+            if active_process and active_process.poll() is None:
+                active_process.kill()
+                active_process.wait()
+                active_process = None
 
-            def pipe_reader(pipe, msg_type):
-                line_buffer = ""
-                try:
-                    while True:
-                        char = pipe.read(1)
-                        if not char:
-                            break
-                        
-                        line_buffer += char
-                        if char == '\n' or char == '\r':
-                            if "--END_OF_COMMAND--" in line_buffer:
-                                # The CWD follow-up is coming
-                                rest = pipe.readline().strip()
-                                loop.call_soon_threadsafe(queue.put_nowait, {"type": "cwd", "content": rest})
-                                line_buffer = ""
-                                continue
-                            
-                            # Flush the line (or part of line if \r)
-                            loop.call_soon_threadsafe(queue.put_nowait, {"type": msg_type, "content": line_buffer})
-                            line_buffer = ""
-                        
-                        # Optimization: if the line gets very long without a newline, flush it anyway
-                        if len(line_buffer) > 200:
-                            loop.call_soon_threadsafe(queue.put_nowait, {"type": msg_type, "content": line_buffer})
-                            line_buffer = ""
-                            
-                except Exception:
-                    pass
-                finally:
-                    pipe.close()
+            # Flush old queue
+            while not output_queue.empty():
+                try: output_queue.get_nowait()
+                except: break
 
-            # Start the process using standard subprocess (works in any loop)
-            process = subprocess.Popen(
+            # Build chained cmd: run command, then echo delimiter, then print CWD
+            chained_cmd = f"chcp 65001 >nul 2>&1 & cd /d \"{start_dir}\" & {command}"
+            logger.info(f"[WS] Executing: {chained_cmd}")
+
+            prompt_line = f"\n{start_dir}> {command}\n"
+            if run_id in runs:
+                old = runs[run_id]["live"].get("terminal_output", "")
+                runs[run_id]["live"]["terminal_output"] = (old + prompt_line)[-20000:]
+            await websocket.send_json({"type": "output", "content": prompt_line})
+
+            active_process = subprocess.Popen(
                 chained_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE,  # Enable stdin for interactive commands
                 shell=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                bufsize=1,
-                universal_newlines=True
+                bufsize=0,
+                cwd=str(start_dir),
             )
 
-            # Read pipes in threads
-            t1 = threading.Thread(target=pipe_reader, args=(process.stdout, "output"), daemon=True)
-            t2 = threading.Thread(target=pipe_reader, args=(process.stderr, "error"), daemon=True)
+            # Track new CWD (best-effort after simple cd commands)
+            if command.strip().lower().startswith("cd "):
+                target_path = command.strip()[3:].strip().strip('"')
+                try:
+                    candidate = (Path(cwd) / target_path).resolve()
+                    if candidate.is_dir():
+                        current_cwd = str(candidate)
+                        await websocket.send_json({"type": "cwd", "content": current_cwd})
+                except Exception:
+                    pass
+
+            # Start reader threads
+            t1 = threading.Thread(target=pipe_reader, args=(active_process.stdout, "output"), daemon=True)
+            t2 = threading.Thread(target=pipe_reader, args=(active_process.stderr, "error"), daemon=True)
             t1.start()
             t2.start()
 
-            # Async loop to consume the queue and send to websocket
-            try:
-                while t1.is_alive() or t2.is_alive() or not queue.empty():
-                    try:
-                        # Non-blocking get with timeout
-                        msg = await asyncio.wait_for(queue.get(), timeout=0.1)
-                        
-                        if msg["type"] in ["output", "error"]:
-                            if run_id in runs:
-                                old = runs[run_id]["live"].get("terminal_output", "")
-                                runs[run_id]["live"]["terminal_output"] = (old + msg["content"])[-20000:]
-                        
-                        await websocket.send_json(msg)
-                    except asyncio.TimeoutError:
-                        continue
-                    except (WebSocketDisconnect, RuntimeError):
-                        logger.info(f"[WS] Session closed during execution: {run_id}")
-                        process.kill()
-                        return # Exit the entire handler
-                    except Exception as e:
-                        logger.error(f"[WS] Streaming error: {e}")
-                        break
-            finally:
-                save_projects()
-                process.wait()
-                try: await websocket.send_json({"type": "done", "exit_code": process.returncode})
-                except: pass
-
     except WebSocketDisconnect:
-        logger.info(f"Terminal WS disconnected: {run_id}")
+        logger.info(f"[WS] Terminal disconnected: {run_id}")
     except Exception as e:
-        logger.exception(f"Terminal WS error for {run_id}")
+        logger.exception(f"[WS] Terminal error: {run_id}")
         try: await websocket.send_json({"type": "error", "content": str(e)})
         except: pass
+    finally:
+        if active_process and active_process.poll() is None:
+            try: active_process.kill()
+            except: pass
+        save_projects()
+
 
 @app.post("/terminal")
 async def execute_terminal_command(req: TerminalRequest):
@@ -823,6 +1155,14 @@ async def execute_terminal_command(req: TerminalRequest):
         
         if error and not output:
              output = f"Error: Command execution returned non-zero status.\n{error}"
+
+        # Sync manual command output to the live terminal_output for UI consistency
+        if req.run_id in runs:
+            # Append prompt indicator and command, then output
+            prompt = f"\n{new_cwd}> {req.command}\n"
+            current_output = runs[req.run_id]["live"].get("terminal_output", "")
+            runs[req.run_id]["live"]["terminal_output"] = (current_output + prompt + output + "\n")[-20000:]
+            save_projects()
 
         return {
             "output": output,
