@@ -265,6 +265,26 @@ def detect_project_type(repo_path: Path) -> str:
         except: pass
         
     return ", ".join(set(types)) if types else "Generic / Unknown"
+    
+def refresh_run_files(run_id: str, repo_path: Path) -> list[dict]:
+    """Helper to refresh the file list for a run, supporting both git and non-git projects."""
+    from git_utils import get_all_files
+    try:
+        from git import Repo
+        try:
+            repo_obj = Repo(repo_path)
+        except Exception:
+            class MockRepo:
+                def __init__(self, p): self.working_dir = str(p)
+            repo_obj = MockRepo(repo_path)
+            
+        files = get_all_files(repo_obj)
+        if run_id in runs:
+            runs[run_id].setdefault("live", {})["files"] = files
+        return files
+    except Exception as e:
+        logger.error(f"Failed to refresh files for {run_id}: {e}")
+        return []
 
 def import_chat_history(run_id: str, repo_path: Path):
     """Try to import chat history from the workspace folder if empty in the central DB."""
@@ -470,9 +490,15 @@ async def chat_with_agent(req: ChatRequest):
             "1. Use `#### Header Name` for sections.\n"
             "2. Cite files using `[File.ext]`.\n\n"
             "--- AUTONOMOUS ACTION PROTOCOL ---\n"
-            "1. **CREATE/MODIFY FILES**: `CREATE_FILE: path/to/file.ext`\n"
-            "2. **EXECUTE TERMINAL COMMANDS**: `RUN_COMMAND: command`.\n\n"
+            "1. **CREATE/MODIFY FILES**: To create or modify a file, you MUST use the following EXACT format on a new line:\n"
+            "   CREATE_FILE: path/to/file.ext\n"
+            "   ```\n"
+            "   content here\n"
+            "   ```\n"
+            "   Important: The `CREATE_FILE:` line must be a separate line, immediately followed by the code block. Do NOT skip lines between the command and the code block. Use only forward slashes `/` in paths.\n"
+            "2. **EXECUTE TERMINAL COMMANDS**: To run a command, use: `RUN_COMMAND: command` on a new line.\n\n"
             "Think like a **10-year veteran**: **Vibe -> Thought -> Plan -> Step -> Validate -> Satisfy**.\n"
+            "Do NOT hallucinate successful validation. Wait for SYSTEM confirmation after an action.\n"
         )
 
         if "summary" in msg_lower:
@@ -540,53 +566,50 @@ async def chat_with_agent(req: ChatRequest):
         max_iterations = 5
         iteration = 0
         final_response = ""
-        last_tool_output = ""
+        verification_log = []
+        is_reiteration = False
 
         while iteration < max_iterations:
             iteration += 1
-            
+            tool_output_messages = [] # Collect system messages from tool outputs for this iteration
+
             # Prepare messages for this turn
             current_messages = [{"role": "system", "content": f"{system_instruction}\n\n{context_str}"}]
-            
+
             # Get history (for the first turn, we add the user message)
             try:
                 if iteration == 1:
                     add_chat_message(req.run_id or "unknown", req.session_id or "default", "user", req.message)
-                
+
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
-                c.execute("SELECT role, content FROM chat_messages WHERE run_id = ? AND session_id = ? ORDER BY timestamp DESC LIMIT 15",
+                # Fetch more history to provide better context for verification
+                c.execute("SELECT role, content FROM chat_messages WHERE run_id = ? AND session_id = ? ORDER BY timestamp DESC LIMIT 20",
                           (req.run_id or "unknown", req.session_id or "default"))
                 history_rows = c.fetchall()
                 history_rows.reverse()
                 for h in history_rows:
-                    # Role mapping for LLM alternating roles (user/assistant)
-                    # agent -> assistant
-                    # user/system -> user
                     if h[0] == "agent":
                         role = "assistant"
                         content = h[1]
                     else:
                         role = "user"
-                        # If it's a system message, prefix it for context so agent knows it's tool output
                         content = f"[SYSTEM: {h[1]}]" if h[0] == "system" else h[1]
-                    
+
                     current_messages.append({"role": role, "content": content})
                 conn.close()
-                
+
                 # Cleanup: Ensure strictly alternating user/assistant roles
                 deduped = []
                 for m in current_messages:
                     if deduped and deduped[-1]["role"] == m["role"]:
-                        # Merge content if roles are identical
                         deduped[-1]["content"] += "\n\n" + m["content"]
                     else:
                         deduped.append(m)
-                
-                # The API requires history to start with 'user' role after system
+
                 while deduped and deduped[0]["role"] == "assistant":
                     deduped.pop(0)
-                
+
                 current_messages = deduped
             except Exception as db_err:
                 logger.error(f"DB error during chat loop: {db_err}")
@@ -595,7 +618,7 @@ async def chat_with_agent(req: ChatRequest):
 
             # Call LLM
             response = _call_nvidia(current_messages, api_data=req.api_data)
-            
+
             # Persist agent response
             add_chat_message(req.run_id or "unknown", req.session_id or "default", "agent", response)
 
@@ -603,32 +626,89 @@ async def chat_with_agent(req: ChatRequest):
             if response.strip():
                 final_response += response + "\n\n"
 
-            # Check for termination keyword
-            if "#### Final Summary" in response or "Task Complete" in response:
-                break
-
             # Check for actions
-            import re
             action_taken = False
-            
-            # 1. Check for File Creation
-            creation_pattern = r"(?:CREATE_FILE:|WRITE_FILE:)\s*([^\s\n]+)\s*\n*```(?:\w+)?\n(.*?)\n```"
-            matches = list(re.finditer(creation_pattern, response, re.DOTALL))
-            if matches and req.run_id:
+            tool_success = True
+            tool_feedback = []
+
+            # --- ACTION A: FOLDER CREATION ---
+            folder_pattern = r"(?:CREATE_FOLDER:|MKDIR:|CREATE_DIRECTORY:)\s*([a-zA-Z0-9_/.\\-]+)/?\s*(?:\n|$)|(?:CREATE_FILE:|WRITE_FILE:)\s*([a-zA-Z0-9_/.\\-]+[/\\])\s*(?:\n|$)"
+            created_dirs = set()
+            for f_match in re.finditer(folder_pattern, response, re.IGNORECASE):
+                path_str = (f_match.group(1) or f_match.group(2)).strip()
+                if not path_str: continue
                 repo_path = get_repo_path(req.run_id)
                 if repo_path:
-                    action_taken = True
-                    for match in matches:
-                        target, content = match.group(1).strip(), match.group(2)
-                        full_p = (repo_path / target).resolve()
-                        if str(full_p).startswith(str(repo_path.resolve())):
-                            full_p.parent.mkdir(parents=True, exist_ok=True)
-                            full_p.write_text(content, encoding="utf-8")
-                            logger.info(f"[CHAT-AGENT] Created: {target}")
-                            maybe_auto_commit(req.run_id, f"Auto-commit: Modified {target}")
-                            add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", f"Successfully created/modified file: {target}")
+                    full_p = (repo_path / path_str).resolve()
+                    if str(full_p).startswith(str(repo_path.resolve())):
+                        action_taken = True
+                        try:
+                            full_p.mkdir(parents=True, exist_ok=True)
+                            created_dirs.add(str(full_p))
+                            logger.info(f"[CHAT-AGENT] Created Directory: {path_str}")
+                            tool_feedback.append(f"Successfully created directory: {path_str}")
+                        except Exception as e:
+                            tool_success = False
+                            tool_feedback.append(f"Failed to create directory {path_str}: {str(e)}")
+                    else:
+                        tool_success = False
+                        tool_feedback.append(f"Attempted to create directory outside project root: {path_str}")
 
-            # 2. Check for Push Action (this is usually a terminal action or final step)
+            # --- ACTION B: FILE CREATION/MODIFICATION ---
+            file_blocks = re.split(r"(?=CREATE_FILE:|WRITE_FILE:)", response, flags=re.IGNORECASE)
+            for block in file_blocks:
+                if not block.strip().lower().startswith(("create_file:", "write_file:")):
+                    continue
+
+                fn_match = re.search(r"(?:CREATE_FILE:|WRITE_FILE:)\s*([a-zA-Z0-9_/.\\-]+)", block, re.IGNORECASE)
+                if not fn_match: continue
+                target_file = fn_match.group(1).strip()
+
+                if target_file.endswith("/") or target_file.endswith("\\"): continue
+
+                content = ""
+                md_match = re.search(r"```(?:\w+)?\n(.*?)\n```", block, re.DOTALL)
+                if md_match:
+                    content = md_match.group(1)
+                else:
+                    lines = block.split("\n")
+                    useful_lines = []
+                    start_collecting = False
+                    for line in lines[1:]:
+                        l_strip = line.strip().lower()
+                        if l_strip in ["code", "content:", "code:", "```"]:
+                            start_collecting = True
+                            continue
+                        if any(l_strip.startswith(x) for x in ["run_command:", "####", "create_file:", "write_file:"]):
+                            break
+                        useful_lines.append(line)
+                    if useful_lines:
+                        content = "\n".join(useful_lines).strip()
+
+                if content and req.run_id:
+                    repo_path = get_repo_path(req.run_id)
+                    if repo_path:
+                        full_p = (repo_path / target_file).resolve()
+                        if str(full_p).startswith(str(repo_path.resolve())):
+                            if full_p.is_dir():
+                                tool_feedback.append(f"Warning: Skipping file write for {target_file} as it is a directory.")
+                                continue
+
+                            action_taken = True
+                            try:
+                                full_p.parent.mkdir(parents=True, exist_ok=True)
+                                full_p.write_text(content, encoding="utf-8")
+                                logger.info(f"[CHAT-AGENT] Created/Modified File: {target_file}")
+                                maybe_auto_commit(req.run_id, f"Auto-commit: Modified {target_file}")
+                                tool_feedback.append(f"Successfully created/modified file: {target_file}")
+                            except Exception as e:
+                                tool_success = False
+                                tool_feedback.append(f"Failed to create/modify file {target_file}: {str(e)}")
+                        else:
+                            tool_success = False
+                            tool_feedback.append(f"Attempted to create/modify file outside project root: {target_file}")
+
+            # --- ACTION C: Push Action ---
             push_pattern = r"PUSH_TO_GITHUB:\s*(true|yes)"
             if re.search(push_pattern, response, re.IGNORECASE) and req.run_id:
                 repo_path = get_repo_path(req.run_id)
@@ -639,69 +719,87 @@ async def chat_with_agent(req: ChatRequest):
                         repo_obj = Repo(repo_path)
                         pat = os.getenv("GITHUB_PAT")
                         push_changes(repo_obj, pat=pat)
-                        tool_msg = "Successfully pushed changes to GitHub."
-                        final_response += f"\n#### 🚀 Action: Pushed to GitHub\n{tool_msg}\n"
-                        add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", tool_msg)
+                        tool_feedback.append("Successfully pushed changes to GitHub.")
                     except Exception as e:
-                        err_msg = f"Failed to push to GitHub: {str(e)}"
-                        final_response += f"\n#### ❌ Action Failure: Push to GitHub\n{err_msg}\n"
-                        add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", err_msg)
+                        tool_success = False
+                        tool_feedback.append(f"Failed to push to GitHub: {str(e)}")
 
-            # 3. Check for Terminal Commands
-            command_pattern = r"RUN_COMMAND:\s*(.*)"
-            cmd_match = re.search(command_pattern, response, re.IGNORECASE)
-            
-            if cmd_match and req.run_id:
-                action_taken = True
-                cmd = cmd_match.group(1).strip()
-                cmd = re.sub(r'[`\s]+$', '', cmd) 
+            # --- ACTION D: Terminal Commands ---
+            command_pattern = r"RUN_COMMAND:\s*([^\n]+)"
+            cmd_matches = list(re.finditer(command_pattern, response, re.IGNORECASE))
+
+            if cmd_matches and req.run_id:
                 repo_path = get_repo_path(req.run_id)
                 if repo_path:
-                    logger.info(f"[CHAT-AGENT] Executing: {cmd}")
-                    try:
-                        exec_cmd = cmd
-                        if is_windows:
-                            exec_cmd = ["powershell", "-NoProfile", "-Command", cmd]
-                        
-                        proc = subprocess.run(
-                            exec_cmd,
-                            cwd=repo_path,
-                            shell=not is_windows,
-                            capture_output=True,
-                            text=True,
-                            timeout=60
-                        )
-                        output = (proc.stdout + "\n" + proc.stderr).strip()
-                        tool_msg = f"--- TERMINAL OUTPUT ({cmd}) ---\n{output}"
-                        final_response += f"#### 🖥️ Action: `{cmd}`\n```\n{output}\n```\n\n"
-                        add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", tool_msg)
-                    except Exception as e:
-                        err_msg = f"Error executing command: {str(e)}"
-                        add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", err_msg)
-            
-            # If no significant action was taken, we must have reached a logical conclusion or need user input
-            if not action_taken:
+                    for cmd_match in cmd_matches:
+                        action_taken = True
+                        cmd = cmd_match.group(1).strip()
+                        cmd = re.sub(r'[`\s]+$', '', cmd)
+                        logger.info(f"[CHAT-AGENT] Executing: {cmd}")
+                        try:
+                            exec_cmd = cmd
+                            if is_windows:
+                                exec_cmd = ["powershell", "-NoProfile", "-Command", cmd]
+
+                            proc = subprocess.run(
+                                exec_cmd,
+                                cwd=repo_path,
+                                shell=not is_windows,
+                                capture_output=True,
+                                text=True,
+                                timeout=60
+                            )
+                            output = (proc.stdout + "\n" + proc.stderr).strip()
+                            tool_feedback.append(f"--- TERMINAL OUTPUT ({cmd}) ---\n{output}")
+                            if proc.returncode != 0:
+                                tool_success = False
+                                tool_feedback.append(f"Command failed with exit code {proc.returncode}.")
+                        except Exception as e:
+                            tool_success = False
+                            tool_feedback.append(f"Error executing command '{cmd}': {str(e)}")
+
+            # Add tool feedback to chat history as system messages
+            for feedback_msg in tool_feedback:
+                add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", feedback_msg)
+                tool_output_messages.append(feedback_msg)
+
+            # Update verification log
+            verification_log.append({
+                "iteration": iteration,
+                "actions_taken": action_taken,
+                "tool_success": tool_success,
+                "feedback": tool_feedback
+            })
+
+            # If no action was taken or final summary, break
+            if not action_taken or "#### Final Summary" in response or "Task Complete" in response:
                 break
-            
-            # Optional: Clear context cache or refresh file list if needed
-            # We refresh the context_str slightly at the top of the loop anyway if we use local files
+
+            # If actions were taken but some failed, set for reiteration
+            if action_taken and not tool_success:
+                is_reiteration = True
+                # The next iteration will include the system feedback in its context
+                continue
+            elif action_taken and tool_success:
+                # If actions were successful, but the agent didn't explicitly finish,
+                # it might need to continue to the next step of its plan.
+                # We don't set is_reiteration to True here, as it implies a failure.
+                pass
 
         # Final state refresh
         updated_live = None
         if req.run_id:
             repo_path = get_repo_path(req.run_id)
             if repo_path:
-                from git_utils import get_all_files
-                from git import Repo
-                try:
-                    repo_obj = Repo(repo_path)
-                    updated_live = get_all_files(repo_obj)
-                    runs[req.run_id]["live"]["files"] = updated_live
-                except: pass
+                updated_live = refresh_run_files(req.run_id, repo_path)
 
-        payload = {"response": final_response.strip()}
+        payload = {
+            "response": final_response.strip(),
+            "verification_log": verification_log,
+            "is_reiteration": is_reiteration
+        }
         if updated_live: payload["live"] = {"files": updated_live}
-        
+
         save_projects() # Persist state after chat actions
         return payload
 
@@ -717,11 +815,11 @@ async def get_chat_history(run_id: str, session_id: str = "default"):
         c.execute("SELECT role, content, timestamp FROM chat_messages WHERE run_id = ? AND session_id = ? ORDER BY timestamp ASC", (run_id, session_id))
         rows = c.fetchall()
         conn.close()
-        
+
         merged_history = []
         for r in rows:
             role, content, ts = r[0], r[1], r[2]
-            
+
             # Merge 'system' messages into the preceding 'agent' message if possible
             if role == "system" and merged_history and merged_history[-1]["role"] == "agent":
                 if content.strip():
@@ -919,10 +1017,7 @@ async def create_item(req: CreateItemRequest):
         else:
             full_p.parent.mkdir(parents=True, exist_ok=True)
             if not full_p.exists(): full_p.write_text("", encoding="utf-8")
-        from git_utils import get_all_files
-        from git import Repo
-        updated_live = get_all_files(Repo(target))
-        if req.run_id in runs: runs[req.run_id]["live"]["files"] = updated_live
+        updated_live = refresh_run_files(req.run_id, target)
         return {"message": "Created", "files": updated_live}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
@@ -941,10 +1036,7 @@ async def delete_item(req: DeleteItemRequest):
         elif full_p.is_file():
             full_p.unlink()
             
-        from git_utils import get_all_files
-        from git import Repo
-        updated_live = get_all_files(Repo(target))
-        if req.run_id in runs: runs[req.run_id]["live"]["files"] = updated_live
+        updated_live = refresh_run_files(req.run_id, target)
         return {"message": "Deleted", "files": updated_live}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
@@ -972,15 +1064,7 @@ async def rename_item(req: RenameItemRequest):
         raise HTTPException(status_code=400, detail=f"'{req.new_name}' already exists")
     try:
         src.rename(dest)
-        from git_utils import get_all_files
-        try:
-            from git import Repo
-            updated_live = get_all_files(Repo(target))
-        except Exception:
-            class MockRepo:
-                def __init__(self, p): self.working_dir = str(p)
-            updated_live = get_all_files(MockRepo(target))
-        if req.run_id in runs: runs[req.run_id]["live"]["files"] = updated_live
+        updated_live = refresh_run_files(req.run_id, target)
         return {"message": "Renamed", "files": updated_live}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
@@ -1001,15 +1085,7 @@ async def copy_item(req: CopyItemRequest):
             shutil.copytree(str(src), str(dest))
         else:
             shutil.copy2(str(src), str(dest))
-        from git_utils import get_all_files
-        try:
-            from git import Repo
-            updated_live = get_all_files(Repo(target))
-        except Exception:
-            class MockRepo:
-                def __init__(self, p): self.working_dir = str(p)
-            updated_live = get_all_files(MockRepo(target))
-        if req.run_id in runs: runs[req.run_id]["live"]["files"] = updated_live
+        updated_live = refresh_run_files(req.run_id, target)
         return {"message": "Moved" if req.move else "Copied", "files": updated_live}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 

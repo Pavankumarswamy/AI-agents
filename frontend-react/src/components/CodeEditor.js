@@ -5,7 +5,7 @@ import { useApp } from '../App';
 import ChatSidebar from './ChatSidebar';
 
 export default function CodeEditor() {
-    const { runState, setRunState, API_BASE, setSnippets } = useApp();
+    const { runState, setRunState, API_BASE, setSnippets, loadWorkspace } = useApp();
     const files = useMemo(() => runState.live?.files || [], [runState.live?.files]);
     const fixes = useMemo(() => runState.result?.fixes_table || [], [runState.result?.fixes_table]);
     const fixedPaths = useMemo(() => new Set(fixes.filter(f => f.status === 'fixed').map(f => f.file)), [fixes]);
@@ -271,6 +271,7 @@ export default function CodeEditor() {
                         <span className="badge badge-gray">{files.length}</span>
                     </div>
                     <div className="tree-header-actions">
+                        <button className="icon-btn-tree" title="Refresh Tree" onClick={() => loadWorkspace(runState.runId)}>🔄</button>
                         <button className="icon-btn-tree" title="New File" onClick={() => handleCreate('file')}>📄+</button>
                         <button className="icon-btn-tree" title="New Folder" onClick={() => handleCreate('folder')}>📁+</button>
                     </div>
