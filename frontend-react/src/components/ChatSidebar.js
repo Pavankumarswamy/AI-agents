@@ -19,6 +19,8 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
     const [sessionId, setSessionId] = useState('default');
     const [availableSessions, setAvailableSessions] = useState(['default']);
     const [loading, setLoading] = useState(false);
+    const [isVerifying, setIsVerifying] = useState(false);
+    const [isReiteration, setIsReiteration] = useState(false);
     const scrollRef = useRef(null);
     const sessionTabsListRef = useRef(null);
 
@@ -124,8 +126,11 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
         const finalBackendMsg = technicalMsg; // Sent to backend
 
         setInput('');
+        setMentionMap({});
         setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
         setLoading(true);
+        setIsVerifying(false);
+        setIsReiteration(false);
 
         try {
             const repoFiles = runState.live?.files || [];
@@ -140,6 +145,9 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
                 });
             }
 
+            // Show verifying indicator after a short delay (if actions might be taken)
+            const verifyTimer = setTimeout(() => setIsVerifying(true), 800);
+
             const { data } = await axios.post(`${API_BASE}/chat`, {
                 message: payloadMessage,
                 run_id: runState.runId,
@@ -150,11 +158,35 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
                 session_id: sessionId
             });
 
+            clearTimeout(verifyTimer);
+            setIsVerifying(false);
+
             // Clear snippets after sending
             setSnippets([]);
 
-            // Start typing animation for agent response
-            setMessages(prev => [...prev, { role: 'agent', content: data.response, isTyped: false }]);
+            const newMsgs = [];
+
+            // Add main agent response
+            if (data.response) {
+                newMsgs.push({ role: 'agent', content: data.response, isTyped: false });
+            }
+
+            // Add verification log bubble if there were any actions
+            if (data.verification_log && data.verification_log.length > 0) {
+                const hasAnyAction = data.verification_log.some(v => v.actions_taken);
+                if (hasAnyAction) {
+                    newMsgs.push({
+                        role: 'verification',
+                        content: data.verification_log,
+                        isReiteration: data.is_reiteration,
+                        isTyped: true
+                    });
+                }
+            }
+
+            if (data.is_reiteration) setIsReiteration(true);
+
+            setMessages(prev => [...prev, ...newMsgs]);
 
             // If the agent created a new file, sync the global state to refresh the file tree
             if (data.live) {
@@ -167,6 +199,7 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
                 }));
             }
         } catch (err) {
+            setIsVerifying(false);
             setMessages(prev => [...prev, { role: 'agent', content: '⚠️ Failed to connect to agent.' }]);
         } finally {
             setLoading(false);
@@ -304,32 +337,44 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
             <div className="chat-messages scrollable" ref={scrollRef}>
                 {messages.map((m, i) => (
                     <div key={i} className={`chat-msg msg-${m.role}`}>
-                        <div className="msg-bubble">
-                            {m.role === 'agent' && !m.isTyped ? (
-                                <TypeWriter
-                                    text={m.content}
-                                    onScroll={() => {
-                                        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-                                    }}
-                                    onComplete={() => {
-                                        const newMsgs = [...messages];
-                                        newMsgs[i].isTyped = true;
-                                        setMessages(newMsgs);
-                                    }}
-                                    render={(displayed) => <InteractiveMarkdown content={displayed} onFileSelect={onFileSelect} />}
-                                />
-                            ) : (
-                                <InteractiveMarkdown content={m.content} onFileSelect={onFileSelect} />
-                            )}
-                        </div>
+                        {m.role === 'verification' ? (
+                            <VerificationBubble log={m.content} isReiteration={m.isReiteration} />
+                        ) : (
+                            <div className="msg-bubble">
+                                {m.role === 'agent' && !m.isTyped ? (
+                                    <TypeWriter
+                                        text={m.content}
+                                        onScroll={() => {
+                                            if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+                                        }}
+                                        onComplete={() => {
+                                            const newMsgs = [...messages];
+                                            newMsgs[i].isTyped = true;
+                                            setMessages(newMsgs);
+                                        }}
+                                        render={(displayed) => <InteractiveMarkdown content={displayed} onFileSelect={onFileSelect} />}
+                                    />
+                                ) : (
+                                    <InteractiveMarkdown content={m.content} onFileSelect={onFileSelect} />
+                                )}
+                            </div>
+                        )}
                     </div>
                 ))}
                 {loading && (
                     <div className="chat-msg msg-agent">
                         <div className="msg-bubble thinking-bubble">
-                            <span className="dot-loader"></span>
-                            <span className="dot-loader"></span>
-                            <span className="dot-loader"></span>
+                            {isVerifying ? (
+                                <span className="verify-status">
+                                    {isReiteration ? '🔁 Re-iterating to fix...' : '🔍 Verifying work...'}
+                                </span>
+                            ) : (
+                                <>
+                                    <span className="dot-loader"></span>
+                                    <span className="dot-loader"></span>
+                                    <span className="dot-loader"></span>
+                                </>
+                            )}
                         </div>
                     </div>
                 )}
@@ -396,6 +441,39 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
         </div>
     );
 });
+
+function VerificationBubble({ log, isReiteration }) {
+    if (!log || log.length === 0) return null;
+    const hasFailures = log.some(v => !v.tool_success && v.actions_taken);
+    return (
+        <div className={`verify-bubble ${hasFailures ? 'verify-failure' : 'verify-success'}`}>
+            <div className="verify-header">
+                <span className="verify-icon">{hasFailures ? '⚠️' : '✅'}</span>
+                <span className="verify-title">
+                    {hasFailures ? 'Verification: Issues Detected' : 'Verification: All Actions Passed'}
+                </span>
+                {isReiteration && <span className="reiteration-badge">🔁 Auto-Fixed</span>}
+            </div>
+            {log.map((entry, i) => (
+                entry.actions_taken && (
+                    <div key={i} className="verify-entry">
+                        <div className="verify-iter-label">Iteration {entry.iteration}</div>
+                        {entry.feedback.map((fb, fi) => {
+                            const isSuccess = fb.startsWith('Successfully');
+                            const isFail = fb.includes('FAILED') || fb.includes('failed') || fb.includes('Error') || fb.startsWith('Failed') || fb.startsWith('Command failed');
+                            return (
+                                <div key={fi} className={`verify-line ${isSuccess ? 'vl-ok' : isFail ? 'vl-fail' : 'vl-info'}`}>
+                                    <span className="vl-icon">{isSuccess ? '✅' : isFail ? '❌' : '📋'}</span>
+                                    <span className="vl-text">{fb}</span>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )
+            ))}
+        </div>
+    );
+}
 
 function TypeWriter({ text, onComplete, onScroll, render }) {
     const [displayed, setDisplayed] = useState('');
@@ -597,6 +675,29 @@ function MarkdownTable({ rows, onFileSelect }) {
 
 const STYLES = `
   .chat-sidebar { width: 100%; background: var(--bg-secondary); border-left: 1px solid var(--border); display: flex; flex-direction: column; height: 100%; position: relative; }
+
+  /* Verification Bubble */
+  .msg-verification { align-self: stretch; width: 100%; }
+  .verify-bubble { border-radius: 10px; padding: 10px 14px; font-size: 0.78rem; border: 1px solid; margin: 4px 0; width: 100%; box-sizing: border-box; }
+  .verify-success { background: rgba(0, 200, 150, 0.07); border-color: rgba(0, 200, 150, 0.4); }
+  .verify-failure { background: rgba(255, 80, 80, 0.07); border-color: rgba(255, 80, 80, 0.35); }
+  .verify-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-weight: 700; }
+  .verify-icon { font-size: 0.9rem; }
+  .verify-title { color: var(--text-primary); font-size: 0.78rem; flex: 1; }
+  .reiteration-badge { background: linear-gradient(135deg, #7c3aed, #a855f7); color: #fff; font-size: 0.62rem; padding: 2px 8px; border-radius: 12px; font-weight: 700; animation: reiterPulse 1.5s infinite; }
+  @keyframes reiterPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(168,85,247,0.4); } 50% { box-shadow: 0 0 0 6px rgba(168,85,247,0); } }
+  .verify-entry { margin-bottom: 8px; }
+  .verify-iter-label { font-size: 0.62rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; font-weight: 700; }
+  .verify-line { display: flex; align-items: flex-start; gap: 6px; padding: 3px 0; }
+  .vl-icon { flex-shrink: 0; font-size: 0.8rem; }
+  .vl-text { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; flex: 1; }
+  .vl-ok .vl-text { color: #4ade80; }
+  .vl-fail .vl-text { color: #f87171; }
+  .vl-info .vl-text { color: var(--text-muted); }
+
+  /* Verify status in thinking bubble */
+  .verify-status { font-size: 0.78rem; color: var(--accent-cyan); font-weight: 600; animation: verifyPulse 1.2s ease-in-out infinite; padding: 2px 0; }
+  @keyframes verifyPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
   .chat-header { border-bottom: 1px solid var(--border); background: var(--bg-card); z-index: 10; display: flex; flex-direction: column; }
   .header-row { padding: 8px 12px; display: flex; align-items: center; justify-content: space-between; }
   .header-row.top-row { border-bottom: 1px solid rgba(255,255,255,0.03); }
