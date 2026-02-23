@@ -30,16 +30,37 @@ frontend-react/build/
 # Electron build output
 electron-app/dist/
 
-# Editor / OS
+# Editor / OS / IDE
 .DS_Store
 Thumbs.db
+[Dd]esktop.ini
 .idea/
 .vscode/
 *.swp
 *.swo
+*.sublime-project
+*.sublime-workspace
+
+# Databases
+*.db
+*.sqlite3
+*.sqlite
+backend/chat_history.db
+
+# Environment secrets & config
+.env
+.env.local
+.env.*.local
+backend/.env
+projects.json
+
+# Workspace state
+.gemini/
+.agent/
 
 # Logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+logs/

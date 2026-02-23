@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-from git_utils import clone_repo, create_branch, commit_and_push, get_all_files, cleanup_clone
+from git_utils import clone_repo, create_branch, commit_changes, push_changes, get_all_files, cleanup_clone
 from docker_runner import run_tests
 from llm_client import generate_fix, explain_error, generate_tests_for_code
 from results_generator import generate_results
@@ -173,12 +173,21 @@ def run_pipeline(
                             except Exception as e:
                                 logger.error(f"Failed to update live file content for {f['path']}: {e}")
 
-            # Skip commit/push – apply fixes locally only (per user request)
+            # Re-enable local commits for fixed files (per user request: separate commit and push)
             if fixed_files:
-                update_live("fixing", f"✅ Applied local fixes to {len(fixed_files)} file(s).")
+                update_live("fixing", f"✅ Applied fixes to {len(fixed_files)} file(s). Committing locally...")
                 for f in fixed_files:
                     update_live(append_terminal=f"\n[WRITE] Fixed {f}\n")
-                # Since we're not pushing, CI status is just the local pass/fail
+                
+                try:
+                    commit_msg = f"Fixed issues in: {', '.join(fixed_files)}"
+                    sha = commit_changes(repo, [], commit_msg)
+                    update_live("fixing", f"✅ Committed locally: {sha}. Remember to push to GitHub if desired.")
+                    commit_count += 1
+                except Exception as e:
+                    logger.error(f"Local commit failed: {e}")
+                
+                # Push is handled separately or prompted in UI
                 push_success = False 
             else:
                 push_success = False
@@ -215,7 +224,7 @@ def run_pipeline(
         # ---------------------------------------------------------------------------
         # Record the local path for terminal / file access
         # ---------------------------------------------------------------------------
-        from main import RUN_PATHS, save_projects
+        from state import RUN_PATHS, save_projects
         RUN_PATHS[run_id] = Path(repo.working_dir)
         save_projects()
 

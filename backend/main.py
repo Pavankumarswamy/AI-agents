@@ -35,24 +35,27 @@ from pydantic import BaseModel
 
 from agents import run_pipeline
 from llm_client import _call_nvidia, _strip_markdown
+from git_utils import (
+    clone_repo, 
+    create_branch, 
+    commit_and_push, 
+    get_all_files, 
+    get_clone_path,
+    commit_changes,
+    push_changes
+)
 
 # ---------------------------------------------------------------------------
 # Database & Path Initialization
 # ---------------------------------------------------------------------------
+from state import ROOT_DIR, runs, RUN_PATHS, save_projects, load_projects
+
 if getattr(sys, 'frozen', False):
-    # Running in a bundle (e.g. PyInstaller)
-    # Use AppData for writable data in production
-    APP_DATA = Path(os.getenv("APPDATA", os.path.expanduser("~"))) / "GGU AI-CICD-Healing-Agent"
-    APP_DATA.mkdir(parents=True, exist_ok=True)
-    
-    ROOT_DIR = APP_DATA
+    APP_DATA = ROOT_DIR
     DB_PATH = APP_DATA / "chat_history.db"
-    
-    # We still need to know where the backend.exe is located for reference if needed
     EXE_DIR = Path(sys.executable).parent
 else:
     BACKEND_DIR = Path(__file__).parent
-    ROOT_DIR = BACKEND_DIR.parent
     DB_PATH = BACKEND_DIR / "chat_history.db"
 
 CLONES_DIR = ROOT_DIR / "cloned_repos"
@@ -76,7 +79,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -84,69 +86,8 @@ init_db()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# In-memory run store
-runs: dict = {}
-RUN_PATHS: dict = {}  # Map run_id -> absolute Path on disk
+# State and Persistence are now handled in state.py
 
-# ---------------------------------------------------------------------------
-# Project Persistence
-# ---------------------------------------------------------------------------
-DATA_DIR = ROOT_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
-PROJECTS_FILE = DATA_DIR / "projects.json"
-
-def save_projects():
-    try:
-        data = {
-            "RUN_PATHS": {k: str(v) for k, v in RUN_PATHS.items()},
-            "RUN_META": {
-                k: {
-                    "team_name": v.get("team_name"),
-                    "leader_name": v.get("leader_name"),
-                    "status": v.get("status"),
-                    "terminal_output": v.get("live", {}).get("terminal_output", ""),
-                } for k, v in runs.items()
-            }
-        }
-        PROJECTS_FILE.write_text(json.dumps(data), encoding="utf-8")
-    except Exception as e:
-        logger.warning(f"Failed to save projects: {e}")
-
-def load_projects():
-    if PROJECTS_FILE.exists():
-        try:
-            data = json.loads(PROJECTS_FILE.read_text(encoding="utf-8"))
-            # Load paths first
-            saved_paths = data.get("RUN_PATHS", {})
-            for k, v in saved_paths.items():
-                RUN_PATHS[k] = Path(v)
-            
-            # Load metadata
-            meta = data.get("RUN_META", {})
-            legacy_history = data.get("TERMINAL_HISTORY", {})
-            
-            for k in RUN_PATHS.keys():
-                v = meta.get(k, {})
-                legacy_term = legacy_history.get(k, "")
-                
-                runs[k] = {
-                    "status": v.get("status", "completed"),
-                    "team_name": v.get("team_name") or "GGU AI",
-                    "leader_name": v.get("leader_name") or "AI_PROJECT",
-                    "live": {
-                        "phase": "done",
-                        "message": "Project restored",
-                        "terminal_output": v.get("terminal_output") or legacy_term,
-                        "files": [],
-                        "iterations": []
-                    }
-                }
-                # Import chat history from workspace if DB is empty
-                import_chat_history(k, RUN_PATHS[k])
-        except Exception as e:
-            logger.warning(f"Failed to load projects: {e}")
-
-load_projects()
 
 # ---------------------------------------------------------------------------
 # App Initialization
@@ -156,6 +97,13 @@ app = FastAPI(title="CI/CD Healing Agent API", version="1.0.0")
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
+@app.get("/debug/state")
+async def debug_state():
+    return {
+        "RUN_PATHS": {k: str(v) for k, v in RUN_PATHS.items()},
+        "runs_keys": list(runs.keys())
+    }
 
 app.add_middleware(
     CORSMiddleware,
@@ -224,8 +172,12 @@ class ChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 def get_repo_path(run_id: str) -> Path | None:
     """Resolve the physical disk path for a given run_id."""
+    logger.info(f"[DEBUG] get_repo_path checking run_id: '{run_id}'")
     if run_id in RUN_PATHS:
+        logger.info(f"[DEBUG] Found in RUN_PATHS: {RUN_PATHS[run_id]}")
         return RUN_PATHS[run_id]
+    
+    logger.info(f"[DEBUG] Not in RUN_PATHS. Keys: {list(RUN_PATHS.keys())}")
     
     # Fallback to scanning CLONES_DIR (for past sessions or cloned repos)
     if not CLONES_DIR.exists():
@@ -276,6 +228,44 @@ def add_chat_message(run_id: str, session_id: str, role: str, content: str):
     except Exception as e:
         logger.warning(f"Failed to add chat message for {run_id}: {e}")
 
+def detect_project_type(repo_path: Path) -> str:
+    """Analyze the root directory to identify the project type."""
+    if not repo_path.exists(): return "Unknown"
+    
+    indicators = {
+        "pubspec.yaml": "Flutter/Dart",
+        "package.json": "JavaScript/TypeScript (Node.js/React/Vite)",
+        "requirements.txt": "Python",
+        "pyproject.toml": "Python (Modern)",
+        "setup.py": "Python (Legacy)",
+        "gradlew": "Android/Java/Kotlin",
+        "build.gradle": "Java/Kotlin (Gradle)",
+        "pom.xml": "Java (Maven)",
+        "go.mod": "Go",
+        "CMakeLists.txt": "C/C++",
+        "Solution.sln": ".NET/C#"
+    }
+    
+    types = []
+    for file, name in indicators.items():
+        if (repo_path / file).exists():
+            types.append(name)
+            
+    # Sub-detection for JS/TS
+    if "JavaScript/TypeScript (Node.js/React/Vite)" in types:
+        pkg_json = repo_path / "package.json"
+        try:
+            content = pkg_json.read_text(encoding="utf-8")
+            if "react" in content.lower():
+                types.append("React")
+            if "next" in content.lower():
+                types.append("Next.js")
+            if "typescript" in content.lower():
+                types.append("TypeScript")
+        except: pass
+        
+    return ", ".join(set(types)) if types else "Generic / Unknown"
+
 def import_chat_history(run_id: str, repo_path: Path):
     """Try to import chat history from the workspace folder if empty in the central DB."""
     history_file = repo_path / ".gguai" / "chat_history.json"
@@ -294,6 +284,23 @@ def import_chat_history(run_id: str, repo_path: Path):
         conn.close()
     except Exception as e:
         logger.warning(f"Import history failed for {run_id}: {e}")
+
+def maybe_auto_commit(run_id: str, message: str):
+    """If run_id is a GitHub repo, commit all changes locally."""
+    repo_path = get_repo_path(run_id)
+    if not repo_path: return
+    
+    try:
+        from git import Repo
+        repo = Repo(repo_path)
+        # Check if it has a remote called 'origin' to determine if it's a cloned repo
+        if not repo.remotes or 'origin' not in [r.name for r in repo.remotes]:
+            return
+            
+        commit_changes(repo, [], message)
+        logger.info(f"[Auto-Commit] Committed changes for {run_id}: {message}")
+    except Exception as e:
+        logger.warning(f"[Auto-Commit] Failed for {run_id}: {e}")
 
 def derive_branch_name(team_name: str, leader_name: str) -> str:
     import re
@@ -435,28 +442,37 @@ async def chat_with_agent(req: ChatRequest):
         current_os = platform.system()
         is_windows = (current_os == "Windows")
         
+        # Project Type Detection
+        project_type = "Unknown"
+        repo_path = None
+        if req.run_id:
+            repo_path = get_repo_path(req.run_id)
+            if repo_path:
+                project_type = detect_project_type(repo_path)
+
         system_instruction = (
-            f"You are GGU AI, a world-class Autonomous CI/CD Healing Agent. Current OS: {current_os}\n\n"
-            "ALWAYS use the following Markdown patterns for premium display:\n"
-            "1. Use `#### Header Name` for important section titles (this triggers larger fonts).\n"
-            "2. Use `[File.py]` or `[Citation]` brackets to cite specific source files or points.\n"
-            "3. Use **Tables** and **Numbered Lists** whenever appropriate.\n\n"
+            f"You are **GGU AI**, a high-performance **Senior Software Engineer (10+ years exp)** living inside the code editor. Current OS: {current_os}\n"
+            f"Detected Project Type: {project_type}\n\n"
+            "--- IDENTITY & EXPERTISE ---\n"
+            "You are a master of Software, App, and Web development. You take full ownership of the project's health and architecture. "
+            "You are proactive—you don't wait to be asked to fix infrastructure. You ensure best practices for `.gitignore`, `.env`, `README.md`, and dependencies.\n\n"
+            "--- OPERATION PROTOCOL (VIBE -> THINK -> PLAN -> ACT -> VALIDATE -> REVIEW) ---\n"
+            "You MUST follow these steps for every request:\n"
+            "1. **Vibe Refinement**: Start with `#### Refined Request`. Structure the intent like a Senior Engineer.\n"
+            "2. **Plan (Checklist)**: Create a `#### Technical Plan` with a clear checklist. Include infrastructure needs (e.g., '- [ ] Update .gitignore').\n"
+            "3. **Iterative Action & Validation**: \n"
+            "   - Execute tasks one by one. \n"
+            "   - **PROACTIVE CONFIG**: If you see missing `.gitignore` or `.env` patterns, include their creation in your plan.\n"
+            "   - **CONTINUOUS VALIDATION**: Explicitly state why each step is verified.\n"
+            "4. **Full Plan Review**: Verify 100% adherence to the `#### Refined Request` and best practices.\n"
+            "5. **Finalize**: Provide a `#### Final Summary`.\n\n"
+            "--- PREMIUM DISPLAY PATTERNS ---\n"
+            "1. Use `#### Header Name` for sections.\n"
+            "2. Cite files using `[File.ext]`.\n\n"
             "--- AUTONOMOUS ACTION PROTOCOL ---\n"
-            "You have full access to the project workspace. You can create/modify files or execute terminal commands.\n\n"
-            "1. **TO CREATE/MODIFY FILES**:\n"
-            "   CREATE_FILE: path/to/file.ext\n"
-            "   ```\n   content\n   ```\n\n"
-            "2. **TO EXECUTE TERMINAL COMMANDS**:\n"
-            "   Use this to list directories, run tests, or check environment state:\n"
-            "   RUN_COMMAND: your_command_here\n\n"
-            f"   NOTE: You are running on {current_os}. " + 
-            ("On Windows, use PowerShell-compatible commands (e.g., `Get-ChildItem` instead of `ls`)." if is_windows else "Use standard POSIX commands.") + "\n\n"
-            "   After you issue a `RUN_COMMAND`, you MUST STOP your response immediately. DO NOT imagine or hallucinate the output. The system will provide the real output in the next turn.\n\n"
-            "3. **ITERATIVE REASONING**:\n"
-            "   If a command fails, analyze the error and try a different approach. DO NOT give up immediately.\n\n"
-            "4. **TO FINISH**:\n"
-            "   When you have completed the task or have a final answer, provide a comprehensive summary starting with `#### Final Summary`.\n\n"
-            "Think step-by-step: Plan -> Act (STOP) -> Observe Output -> Refine -> Complete.\n"
+            "1. **CREATE/MODIFY FILES**: `CREATE_FILE: path/to/file.ext`\n"
+            "2. **EXECUTE TERMINAL COMMANDS**: `RUN_COMMAND: command`.\n\n"
+            "Think like a **10-year veteran**: **Vibe -> Thought -> Plan -> Step -> Validate -> Satisfy**.\n"
         )
 
         if "summary" in msg_lower:
@@ -473,7 +489,7 @@ async def chat_with_agent(req: ChatRequest):
             )
         else:
             system_instruction = (
-                "You are **GGU AI**, a high-performance Autonomous CI/CD Healing Agent. "
+                "You are **GGU AI**, a high-performance Autonomous AI Agent. "
                 "Maintain your identity as a professional workspace companion. "
                 "If the user greets you or asks who you are, prioritize a helpful, conversational response about your capabilities (bug fixing, scanning, test execution). "
                 "Do NOT just output code snippets from the context unless specifically asked to fix or explain them.\n\n"
@@ -587,9 +603,13 @@ async def chat_with_agent(req: ChatRequest):
             if response.strip():
                 final_response += response + "\n\n"
 
+            # Check for termination keyword
+            if "#### Final Summary" in response or "Task Complete" in response:
+                break
 
             # Check for actions
             import re
+            action_taken = False
             
             # 1. Check for File Creation
             creation_pattern = r"(?:CREATE_FILE:|WRITE_FILE:)\s*([^\s\n]+)\s*\n*```(?:\w+)?\n(.*?)\n```"
@@ -597,6 +617,7 @@ async def chat_with_agent(req: ChatRequest):
             if matches and req.run_id:
                 repo_path = get_repo_path(req.run_id)
                 if repo_path:
+                    action_taken = True
                     for match in matches:
                         target, content = match.group(1).strip(), match.group(2)
                         full_p = (repo_path / target).resolve()
@@ -604,50 +625,66 @@ async def chat_with_agent(req: ChatRequest):
                             full_p.parent.mkdir(parents=True, exist_ok=True)
                             full_p.write_text(content, encoding="utf-8")
                             logger.info(f"[CHAT-AGENT] Created: {target}")
+                            maybe_auto_commit(req.run_id, f"Auto-commit: Modified {target}")
+                            add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", f"Successfully created/modified file: {target}")
 
-            # 2. Check for Terminal Commands
+            # 2. Check for Push Action (this is usually a terminal action or final step)
+            push_pattern = r"PUSH_TO_GITHUB:\s*(true|yes)"
+            if re.search(push_pattern, response, re.IGNORECASE) and req.run_id:
+                repo_path = get_repo_path(req.run_id)
+                if repo_path:
+                    action_taken = True
+                    try:
+                        from git import Repo
+                        repo_obj = Repo(repo_path)
+                        pat = os.getenv("GITHUB_PAT")
+                        push_changes(repo_obj, pat=pat)
+                        tool_msg = "Successfully pushed changes to GitHub."
+                        final_response += f"\n#### 🚀 Action: Pushed to GitHub\n{tool_msg}\n"
+                        add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", tool_msg)
+                    except Exception as e:
+                        err_msg = f"Failed to push to GitHub: {str(e)}"
+                        final_response += f"\n#### ❌ Action Failure: Push to GitHub\n{err_msg}\n"
+                        add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", err_msg)
+
+            # 3. Check for Terminal Commands
             command_pattern = r"RUN_COMMAND:\s*(.*)"
             cmd_match = re.search(command_pattern, response, re.IGNORECASE)
             
             if cmd_match and req.run_id:
+                action_taken = True
                 cmd = cmd_match.group(1).strip()
-                # Strip potential trailing markdown characters if agent was sloppy
                 cmd = re.sub(r'[`\s]+$', '', cmd) 
                 repo_path = get_repo_path(req.run_id)
                 if repo_path:
                     logger.info(f"[CHAT-AGENT] Executing: {cmd}")
                     try:
-                        # Prepare command based on OS
                         exec_cmd = cmd
                         if is_windows:
-                            # Use PowerShell for better compatibility on Windows
                             exec_cmd = ["powershell", "-NoProfile", "-Command", cmd]
                         
-                        # Use subprocess to run the command in the repo root
                         proc = subprocess.run(
                             exec_cmd,
                             cwd=repo_path,
-                            shell=not is_windows, # shell=True is problematic with list args on windows if not careful
+                            shell=not is_windows,
                             capture_output=True,
                             text=True,
                             timeout=60
                         )
-                        output = proc.stdout + "\n" + proc.stderr
+                        output = (proc.stdout + "\n" + proc.stderr).strip()
                         tool_msg = f"--- TERMINAL OUTPUT ({cmd}) ---\n{output}"
                         final_response += f"#### 🖥️ Action: `{cmd}`\n```\n{output}\n```\n\n"
-                        
-                        # Save tool output to history
                         add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", tool_msg)
-                        
-                        # Continue to next iteration to let agent process output
-                        continue
                     except Exception as e:
                         err_msg = f"Error executing command: {str(e)}"
                         add_chat_message(req.run_id or "unknown", req.session_id or "default", "system", err_msg)
-                        continue
             
-            # If no more commands, break the loop
-            break
+            # If no significant action was taken, we must have reached a logical conclusion or need user input
+            if not action_taken:
+                break
+            
+            # Optional: Clear context cache or refresh file list if needed
+            # We refresh the context_str slightly at the top of the loop anyway if we use local files
 
         # Final state refresh
         updated_live = None
@@ -680,7 +717,21 @@ async def get_chat_history(run_id: str, session_id: str = "default"):
         c.execute("SELECT role, content, timestamp FROM chat_messages WHERE run_id = ? AND session_id = ? ORDER BY timestamp ASC", (run_id, session_id))
         rows = c.fetchall()
         conn.close()
-        return {"history": [{"role": r[0], "content": r[1], "timestamp": r[2]} for r in rows]}
+        
+        merged_history = []
+        for r in rows:
+            role, content, ts = r[0], r[1], r[2]
+            
+            # Merge 'system' messages into the preceding 'agent' message if possible
+            if role == "system" and merged_history and merged_history[-1]["role"] == "agent":
+                if content.strip():
+                    # Format system output nicely within the agent bubble
+                    merged_history[-1]["content"] += f"\n\n---\n**System Output:**\n```\n{content.strip()}\n```"
+            else:
+                # Map 'agent' to 'agent' for frontend (history role is already correct in DB)
+                merged_history.append({"role": role, "content": content, "timestamp": ts})
+                
+        return {"history": merged_history}
     except Exception as e:
         logger.error(f"History fetch failed: {e}")
         return {"history": []}
@@ -967,7 +1018,7 @@ async def copy_item(req: CopyItemRequest):
 @app.websocket("/ws/terminal/{run_id}")
 async def terminal_websocket(websocket: WebSocket, run_id: str):
     """Handle real-time interactive terminal with stdin support."""
-    logger.info(f"[WS] Accepting terminal connection for {run_id}")
+    logger.info(f"[WS] Accepting terminal connection for run_id: '{run_id}'")
     await websocket.accept()
 
     repo_root = get_repo_path(run_id)
@@ -1263,6 +1314,12 @@ async def download_fixed_code(run_id: str):
             with open(zip_full_path, "rb") as f: yield from f
         return StreamingResponse(iterfile(), media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=project_{run_id}.zip"})
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
+# ---------------------------------------------------------------------------
+# State Initialization
+# ---------------------------------------------------------------------------
+init_db()
+load_projects(import_chat_history)
 
 if __name__ == "__main__":
     import uvicorn

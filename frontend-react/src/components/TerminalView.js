@@ -7,98 +7,47 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useApp } from '../App';
 
 // Always target the backend directly — React dev server doesn't proxy WebSockets
-const WS_BASE = 'ws://127.0.0.1:8000';
 
 export default function TerminalView() {
-  const { runState } = useApp();
+  const {
+    runState,
+    terminalLines,
+    terminalWsRef,
+    isTerminalRunning,
+    setIsTerminalRunning,
+    terminalCwd
+  } = useApp();
+
   const runId = runState?.runId;
 
-  const [lines, setLines] = useState(['Welcome to GGU Terminal. Open a workspace to begin.\n']);
   const [inputValue, setInputValue] = useState('');
   const [cmdHistory, setCmdHistory] = useState([]);
-  const [historyPos, setHistoryPos] = useState(-1);
-  const [cwd, setCwd] = useState(null);
-  const [isRunning, setIsRunning] = useState(false);
+  const [, setHistoryPos] = useState(-1);
 
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
-  const wsRef = useRef(null);
 
   // Auto-scroll output
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [lines]);
-
-  // Connect WebSocket when runId changes
-  useEffect(() => {
-    if (!runId) return;
-
-    // Close any existing connection
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-
-    const ws = new WebSocket(`${WS_BASE}/ws/terminal/${runId}`);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      appendLine('\n🔗 Terminal connected.\n', 'system');
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'output' || msg.type === 'error') {
-          appendLine(msg.content, msg.type);
-        } else if (msg.type === 'cwd') {
-          setCwd(msg.content);
-        } else if (msg.type === 'done') {
-          setIsRunning(false);
-          appendLine(`\n[Process exited with code ${msg.exit_code}]\n`, 'system');
-          inputRef.current?.focus();
-        }
-      } catch (e) {
-        console.error('WS msg parse error', e);
-      }
-    };
-
-    ws.onclose = () => {
-      appendLine('\n⚡ Terminal disconnected.\n', 'system');
-      wsRef.current = null;
-    };
-
-    ws.onerror = (err) => {
-      appendLine('\n❌ WebSocket error. Reconnect by switching workspace.\n', 'error');
-      console.error('WS error', err);
-    };
-
-    return () => {
-      ws.close();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId]);
-
-  const appendLine = (text, type = 'output') => {
-    setLines(prev => [...prev.slice(-2000), { text, type }]);
-  };
+  }, [terminalLines]);
 
   const sendMessage = useCallback((payload) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(payload));
+    if (terminalWsRef.current && terminalWsRef.current.readyState === WebSocket.OPEN) {
+      terminalWsRef.current.send(JSON.stringify(payload));
       return true;
     }
     return false;
-  }, []);
+  }, [terminalWsRef]);
 
   const runCommand = useCallback(() => {
     const cmd = inputValue.trim();
     if (!cmd) return;
 
     // If process is running, send as stdin
-    if (isRunning) {
+    if (isTerminalRunning) {
       sendMessage({ type: 'stdin', data: cmd });
       setInputValue('');
       setHistoryPos(-1);
@@ -106,17 +55,16 @@ export default function TerminalView() {
     }
 
     // Otherwise, start a new command
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      appendLine('\n❌ Terminal not connected. Open a workspace first.\n', 'error');
+    if (!terminalWsRef.current || terminalWsRef.current.readyState !== WebSocket.OPEN) {
       return;
     }
 
     setCmdHistory(prev => [cmd, ...prev.slice(0, 49)]);
     setHistoryPos(-1);
-    setIsRunning(true);
+    setIsTerminalRunning(true);
     setInputValue('');
-    sendMessage({ type: 'command', command: cmd, cwd: cwd || null });
-  }, [inputValue, isRunning, cwd, sendMessage]);
+    sendMessage({ type: 'command', command: cmd, cwd: terminalCwd || null });
+  }, [inputValue, isTerminalRunning, terminalCwd, sendMessage, terminalWsRef, setIsTerminalRunning]);
 
   const handleKeyDown = useCallback((e) => {
     if (e.key === 'Enter') {
@@ -125,26 +73,26 @@ export default function TerminalView() {
       e.preventDefault();
       setHistoryPos(prev => {
         const next = Math.min(prev + 1, cmdHistory.length - 1);
-        if (!isRunning) setInputValue(cmdHistory[next] || '');
+        if (!isTerminalRunning) setInputValue(cmdHistory[next] || '');
         return next;
       });
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
       setHistoryPos(prev => {
         const next = Math.max(prev - 1, -1);
-        if (!isRunning) setInputValue(next === -1 ? '' : (cmdHistory[next] || ''));
+        if (!isTerminalRunning) setInputValue(next === -1 ? '' : (cmdHistory[next] || ''));
         return next;
       });
     } else if (e.key === 'c' && e.ctrlKey) {
       // Ctrl+C - kill process
       sendMessage({ type: 'stdin', data: '\x03' });
-      setIsRunning(false);
+      setIsTerminalRunning(false);
     }
-  }, [runCommand, cmdHistory, isRunning, sendMessage]);
+  }, [runCommand, cmdHistory, isTerminalRunning, sendMessage, setIsTerminalRunning]);
 
-  const cwdLabel = cwd ? cwd.split(/[/\\]/).filter(Boolean).pop() || cwd : (runId ? '~' : 'no workspace');
+  const cwdLabel = terminalCwd ? terminalCwd.split(/[/\\]/).filter(Boolean).pop() || terminalCwd : (runId ? '~' : 'no workspace');
   const hasWorkspace = !!runId;
-  const isConnected = wsRef.current?.readyState === WebSocket.OPEN;
+  const isConnected = terminalWsRef.current?.readyState === WebSocket.OPEN;
 
   return (
     <div className="terminal-card" onClick={() => inputRef.current?.focus()}>
@@ -152,7 +100,7 @@ export default function TerminalView() {
         <div className="terminal-title-group">
           <span>💻</span>
           <span className="terminal-title">Terminal</span>
-          {cwd && <span className="terminal-cwd-badge">{cwdLabel}</span>}
+          {terminalCwd && <span className="terminal-cwd-badge">{cwdLabel}</span>}
           <span className={`terminal-ws-dot ${isConnected ? 'connected' : ''}`} title={isConnected ? 'Connected' : 'Disconnected'} />
         </div>
         <div className="terminal-controls">
@@ -164,17 +112,17 @@ export default function TerminalView() {
       <div className="glow-divider" />
       <div className="terminal-body" ref={scrollRef}>
         <pre className="terminal-content">
-          {lines.map((l, i) => (
+          {terminalLines.map((l) => (
             typeof l === 'string'
-              ? <span key={i}>{l}</span>
-              : <span key={i} className={`t-${l.type}`}>{l.text}</span>
+              ? <span key={l.id || Math.random()}>{l}</span>
+              : <span key={l.id} className={`t-${l.type}`}>{l.text}</span>
           ))}
         </pre>
       </div>
       <div className="terminal-input-row">
         <span className="terminal-prompt">
           <span className="prompt-path">{cwdLabel}</span>
-          <span className="prompt-arrow">{isRunning ? '⟩' : '>'}</span>
+          <span className="prompt-arrow">{isTerminalRunning ? '⟩' : '>'}</span>
         </span>
         <input
           ref={inputRef}
@@ -185,21 +133,21 @@ export default function TerminalView() {
           onKeyDown={handleKeyDown}
           placeholder={
             !hasWorkspace ? 'Open a workspace first...'
-              : isRunning ? 'Type input and press Enter (Ctrl+C to kill)...'
+              : isTerminalRunning ? 'Type input and press Enter (Ctrl+C to kill)...'
                 : 'Type a command and press Enter...'
           }
           disabled={!hasWorkspace}
           autoComplete="off"
           spellCheck={false}
         />
-        {isRunning && <span className="terminal-spinner" title="Running..." />}
+        {isTerminalRunning && <span className="terminal-spinner" title="Running..." />}
         <button
           className="terminal-run-btn"
           onClick={runCommand}
           disabled={!hasWorkspace || !inputValue.trim()}
-          title={isRunning ? 'Send input' : 'Run command'}
+          title={isTerminalRunning ? 'Send input' : 'Run command'}
         >
-          {isRunning ? '↵' : '▶'}
+          {isTerminalRunning ? '↵' : '▶'}
         </button>
       </div>
       <style>{TERMINAL_STYLES}</style>

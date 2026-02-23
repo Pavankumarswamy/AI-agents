@@ -47,8 +47,57 @@ export default function App() {
     });
     const [snippets, setSnippets] = useState([]);
     const [terminalCwd, setTerminalCwd] = useState(null);
+    const [terminalLines, setTerminalLines] = useState([{ text: 'Welcome to GGU Terminal. Open a workspace to begin.\n', type: 'system', id: Date.now() }]);
+    const [isTerminalRunning, setIsTerminalRunning] = useState(false);
 
     const pollRef = useRef(null);
+    const terminalWsRef = useRef(null);
+
+    // ── WebSocket Management ──────────────────────────────────────────────────
+    const appendTerminalLine = useCallback((text, type = 'output') => {
+        setTerminalLines(prev => {
+            const newLines = [...prev.slice(-1000), { text, type, id: Math.random().toString(36).substr(2, 9) + Date.now() }];
+            return newLines;
+        });
+    }, []);
+
+    useEffect(() => {
+        const runId = runState.runId;
+        if (!runId) return;
+
+        // Connect WebSocket
+        const WS_BASE = 'ws://127.0.0.1:8000';
+        const ws = new WebSocket(`${WS_BASE}/ws/terminal/${runId}`);
+        terminalWsRef.current = ws;
+
+        ws.onopen = () => appendTerminalLine('\n🔗 Terminal connected.\n', 'system');
+        ws.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'output' || msg.type === 'error') {
+                    appendTerminalLine(msg.content, msg.type);
+                } else if (msg.type === 'cwd') {
+                    setTerminalCwd(msg.content);
+                } else if (msg.type === 'done') {
+                    setIsTerminalRunning(false);
+                    appendTerminalLine(`\n[Process exited with code ${msg.exit_code}]\n`, 'system');
+                }
+            } catch (e) { console.error('WS msg parse error', e); }
+        };
+        ws.onclose = () => {
+            appendTerminalLine('\n⚡ Terminal disconnected.\n', 'system');
+            terminalWsRef.current = null;
+        };
+        ws.onerror = (err) => {
+            appendTerminalLine('\n❌ WebSocket error. Reconnect by switching workspace.\n', 'error');
+            console.error('WS error', err);
+        };
+
+        return () => {
+            if (ws) ws.close();
+            terminalWsRef.current = null;
+        };
+    }, [runState.runId, appendTerminalLine]);
 
     const fetchConfig = useCallback(async () => {
         try {
@@ -198,7 +247,7 @@ export default function App() {
             console.error('Terminal command failed:', err);
             return { output: '', error: err.message, exit_code: 1, cwd: terminalCwd };
         }
-    }, [runState.runId, terminalCwd, API_BASE]);
+    }, [runState.runId, terminalCwd]);
 
     // Cleanup on unmount
     useEffect(() => () => clearInterval(pollRef.current), []);
@@ -213,8 +262,9 @@ export default function App() {
 
     const ctx = useMemo(() => ({
         runState, setRunState, startRun, startLocalRun, loadWorkspace, manualSave, downloadFixedCode, API_BASE, configStatus, fetchConfig,
-        snippets, setSnippets, sendTerminalCommand, terminalCwd
-    }), [runState, startRun, startLocalRun, loadWorkspace, manualSave, downloadFixedCode, configStatus, fetchConfig, snippets, sendTerminalCommand, terminalCwd]);
+        snippets, setSnippets, sendTerminalCommand, terminalCwd,
+        terminalLines, terminalWsRef, isTerminalRunning, setIsTerminalRunning
+    }), [runState, startRun, startLocalRun, loadWorkspace, manualSave, downloadFixedCode, configStatus, fetchConfig, snippets, sendTerminalCommand, terminalCwd, terminalLines, isTerminalRunning]);
 
     return (
         <AppContext.Provider value={ctx}>
@@ -251,16 +301,16 @@ export default function App() {
                         <button className="tab-btn" onClick={() => setIsSettingsOpen(true)} style={{ marginRight: 12 }}>
                             ⚙️ Settings
                         </button>
-                        {runState.status === 'running' && (
+                        {(runState.status === 'running' || isTerminalRunning) && (
                             <span className="badge badge-blue pulse">
                                 <span className="spinner" style={{ width: 10, height: 10 }} />
                                 Running
                             </span>
                         )}
-                        {runState.status === 'completed' && (
+                        {runState.status === 'completed' && !isTerminalRunning && (
                             <span className="badge badge-green">✓ Done</span>
                         )}
-                        {runState.status === 'failed' && (
+                        {runState.status === 'failed' && !isTerminalRunning && (
                             <span className="badge badge-red">✗ Error</span>
                         )}
                     </div>

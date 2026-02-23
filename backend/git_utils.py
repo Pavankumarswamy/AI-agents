@@ -91,25 +91,38 @@ def create_branch(repo: Repo, branch_name: str) -> None:
     new_branch.checkout()
 
 
-def commit_and_push(
+def commit_changes(
     repo: Repo,
     changed_files: list[str],
     commit_message: str,
-    pat: str | None = None,
 ) -> str:
     """
-    Stage *changed_files*, commit with *commit_message*, push to origin.
+    Stage *changed_files*, commit with *commit_message*.
     Prepends '[AI-AGENT] ' to the message automatically.
     Returns the short commit SHA.
     """
     if not commit_message.startswith("[AI-AGENT]"):
         commit_message = f"[AI-AGENT] {commit_message}"
 
-    repo.index.add(changed_files)
+    if not changed_files:
+        # If no files specified, stage all changes
+        repo.git.add(A=True)
+    else:
+        repo.index.add(changed_files)
+    
     commit = repo.index.commit(commit_message)
     sha = commit.hexsha[:7]
     logger.info(f"Committed {sha}: {commit_message}")
+    return sha
 
+
+def push_changes(
+    repo: Repo,
+    pat: str | None = None,
+) -> None:
+    """
+    Push current branch to origin.
+    """
     # Configure remote URL with PAT if provided
     if pat:
         remote_url = repo.remotes.origin.url
@@ -144,6 +157,19 @@ def commit_and_push(
         except GitCommandError as exc:
             logger.error(f"Push failed: {exc}")
             raise
+
+
+def commit_and_push(
+    repo: Repo,
+    changed_files: list[str],
+    commit_message: str,
+    pat: str | None = None,
+) -> str:
+    """
+    Backward compatible helper.
+    """
+    sha = commit_changes(repo, changed_files, commit_message)
+    push_changes(repo, pat)
     return sha
 
 
