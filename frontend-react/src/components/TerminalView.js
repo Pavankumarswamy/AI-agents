@@ -15,7 +15,8 @@ export default function TerminalView() {
     terminalWsRef,
     isTerminalRunning,
     setIsTerminalRunning,
-    terminalCwd
+    terminalCwd,
+    openFile
   } = useApp();
 
   const runId = runState?.runId;
@@ -43,8 +44,19 @@ export default function TerminalView() {
   }, [terminalWsRef]);
 
   const runCommand = useCallback(() => {
-    const cmd = inputValue.trim();
-    if (!cmd) return;
+    let cmd = inputValue;
+    // For normal commands, we trim. 
+    // For interactive inputs, we preserve spaces if multi-char, but trim for safety only if multi-char.
+    // Actually, if a process is running, we should be careful with trimming.
+    if (!isTerminalRunning) {
+      cmd = cmd.trim();
+    } else if (cmd.length > 1) {
+      // If it's a multi-char input to an active process, trim trailing whitespace
+      // but keep single keys like ' ' or 'r' intact.
+      cmd = cmd.trim();
+    }
+
+    if (!cmd && !isTerminalRunning) return;
 
     // If process is running, send as stdin
     if (isTerminalRunning) {
@@ -112,11 +124,38 @@ export default function TerminalView() {
       <div className="glow-divider" />
       <div className="terminal-body" ref={scrollRef}>
         <pre className="terminal-content">
-          {terminalLines.map((l) => (
-            typeof l === 'string'
-              ? <span key={l.id || Math.random()}>{l}</span>
-              : <span key={l.id} className={`t-${l.type}`}>{l.text}</span>
-          ))}
+          {terminalLines.map((l, i) => {
+            const text = typeof l === 'string' ? l : l.text;
+            const type = typeof l === 'string' ? 'output' : l.type;
+            const id = l.id || i;
+
+            // Simple regex for file paths (e.g. lib/main.dart or C:\path\file.js)
+            const pathRegex = /([a-zA-Z]:\\[\\\w\s.-]+|[/\w\s.-]+\.\w+)/g;
+            const parts = text.split(pathRegex);
+
+            return (
+              <span key={id} className={`t-${type}`}>
+                {parts.map((part, pi) => {
+                  if (pathRegex.test(part)) {
+                    return (
+                      <span
+                        key={pi}
+                        className="clickable-terminal-path"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openFile(part.trim());
+                        }}
+                        title={`Open ${part.trim()} in editor`}
+                      >
+                        {part}
+                      </span>
+                    );
+                  }
+                  return part;
+                })}
+              </span>
+            );
+          })}
         </pre>
       </div>
       <div className="terminal-input-row">
@@ -163,9 +202,9 @@ const TERMINAL_STYLES = `
     display: flex;
     flex-direction: column;
     /* Let it grow to fill the column, but never shrink below its content */
-    flex: 1 1 auto;
-    min-height: 200px;
-    max-height: 500px;
+    flex: 0 0 auto;
+    min-height: 300px;
+    max-height: 600px;
     margin-bottom: 16px;
     border-radius: 10px;
     overflow: hidden;
@@ -221,7 +260,7 @@ const TERMINAL_STYLES = `
     flex: 1 1 0;
     min-height: 0;
     overflow-y: auto;
-    padding: 10px 14px 130px;
+    padding: 10px 14px 12px;
     font-family: 'Fira Code', 'Courier New', monospace;
     font-size: 0.79rem;
     line-height: 1.55;
@@ -234,6 +273,17 @@ const TERMINAL_STYLES = `
   }
   .t-error { color: #f87171; }
   .t-system { color: #6b7280; font-style: italic; }
+  .clickable-terminal-path {
+    color: #4f8ef7;
+    text-decoration: underline;
+    cursor: pointer;
+    font-weight: 500;
+    transition: 0.2s;
+  }
+  .clickable-terminal-path:hover {
+    color: #22d3ee;
+    text-shadow: 0 0 8px rgba(34, 211, 238, 0.5);
+  }
   .terminal-body::-webkit-scrollbar { width: 5px; }
   .terminal-body::-webkit-scrollbar-thumb { background: #263348; border-radius: 3px; }
   /* Input Row */

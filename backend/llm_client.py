@@ -18,12 +18,14 @@ import os
 import logging
 from dotenv import load_dotenv
 from openai import OpenAI
+from state import GLOBAL_CONFIG
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 # ── NVIDIA API (primary) ──────────────────────────────────────────────────
-NVIDIA_API_KEY    = os.getenv("NVIDIA_API_KEY",   "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")
+# Prioritize GLOBAL_CONFIG from state.py, falling back to .env
+NVIDIA_API_KEY    = GLOBAL_CONFIG.get("nvidia_api_key") or os.getenv("NVIDIA_API_KEY", "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")
 NVIDIA_BASE_URL   = os.getenv("NVIDIA_BASE_URL",  "https://integrate.api.nvidia.com/v1")
 NVIDIA_MODEL      = os.getenv("NVIDIA_MODEL",     "mistralai/mixtral-8x22b-instruct-v0.1")
 

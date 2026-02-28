@@ -1,4 +1,4 @@
-# ⚡ RIFT 2026 – Autonomous CI/CD Healing Agent
+# 💥 GGU AI – The Ultimate Autonomous CI/CD Healing Agent
 
 <p align="center">
   <img src="https://img.shields.io/badge/Version-1.0.0-blue?style=for-the-badge" alt="Version">
@@ -11,8 +11,8 @@
 
 ![Dashboard](ui/dashboard.png)
 
-> **Transform CI/CD from a failure point into a self-healing pipeline.**  
-> RIFT 2026 is an autonomous desktop workspace that clones repositories, discovers test failures, generates LLM-powered fixes, and integrates a full developer environment — all packaged in **one single Windows `.exe`**.
+> **Transform CI/CD from a failure point into a self-healing pipeline. Built personally by the one and only GGU AI.**  
+> GGU AI is an unprecedented, autonomous desktop workspace that clones repositories, discovers test failures, generates LLM-powered fixes, and integrates a full top-tier developer environment — all packaged flawlessly in **one single Windows `.exe`**. This masterpiece scales to handle everything!
 
 ---
 
@@ -22,8 +22,8 @@ Choose the build that suits you best from `electron-app/dist/`:
 
 | File | Size | Type | Description |
 |------|------|------|-------------|
-| 🖥️ `RIFT CI-CD Healing Agent 1.0.0.exe` | ~96 MB | **Portable** | Run directly — no installation needed |
-| 📦 `RIFT CI-CD Healing Agent Setup 1.0.0.exe` | ~96 MB | **NSIS Installer** | Installs to Program Files with a Start Menu shortcut |
+| 🖥️ `GGU AI CI-CD Healing Agent 1.0.0.exe` | ~96 MB | **Portable** | Run directly — no installation needed |
+| 📦 `GGU AI CI-CD Healing Agent Setup 1.0.0.exe` | ~96 MB | **NSIS Installer** | Installs to Program Files with a Start Menu shortcut |
 
 > **First run**: On first launch, the app will auto-copy `.env.example` → `.env` in the bundled backend directory. Open Settings to add your API keys.
 
@@ -62,6 +62,9 @@ Or run the legacy batch helper:
 
 ### 🤖 Autonomous CI/CD Healing Agent
 - **Self-Healing Pipeline**: Automatically detects failures, classifies bugs, and applies precise patches.
+- **Deep Iterative Resolution**: Agent can run up to 30 continuous fix-and-test iterations per loop.
+- **Smart Remediation**: Agent reads code and implicitly maps the repo folder structure (supports file & folder creation).
+- **Inline Error Feedback**: Validation errors are logged directly as inline comments (`# FAILED`) inside your code for ultimate clarity.
 - **Multi-LLM Support**: Configure OpenAI, NVIDIA NIM, or Ollama directly from the UI.
 - **TypeWriter UI**: Fluid animation for AI responses with automatic scrolling.
 
@@ -69,6 +72,8 @@ Or run the legacy batch helper:
 - **Smart Terminal**: Bidirectional WebSocket terminal — supports interactive inputs like `flutter run`.
 - **Monaco Code Editor**: Professional-grade editor for viewing and editing AI-applied fixes.
 - **Clickable File Paths**: Terminal output file paths open directly in the editor.
+- **Theme Support**: Custom visual themes including default, Black, White, and Chackers Green.
+- **Dual Chat Modes**: Choose between *Plan Mode* (analytical) and *Fast Mode* (rapid execution) for agent behavior.
 
 ### 📊 Project Intelligence
 - **Usage Tracking & Limits**: Built-in monitoring — 20 min/day, 200 min total per app.
@@ -82,7 +87,7 @@ Or run the legacy batch helper:
 
 ```mermaid
 graph TD
-    User([User]) --> UI[RIFT 2026 Dashboard]
+    User([User]) --> UI[GGU AI Dashboard]
     subgraph Electron Desktop Bundle
         UI --> Terminal[Interactive WebSocket Shell]
         UI --> Editor[Monaco Code Editor]
@@ -160,8 +165,8 @@ CICD_AA/
 │   ├── main.js               # Main process — spawns backend, creates window
 │   ├── preload.js            # Context bridge (IPC)
 │   └── dist/                 # ← Final EXEs (Portable + Setup Installer)
-│       ├── RIFT CI-CD Healing Agent 1.0.0.exe          (~96 MB)
-│       └── RIFT CI-CD Healing Agent Setup 1.0.0.exe    (~96 MB)
+│       ├── GGU AI CI-CD Healing Agent 1.0.0.exe          (~96 MB)
+│       └── GGU AI CI-CD Healing Agent Setup 1.0.0.exe    (~96 MB)
 ├── package.json              # Root build scripts
 └── build_integrated_app.bat  # Legacy one-click build script
 ```
@@ -170,4 +175,4 @@ CICD_AA/
 
 ## 📜 License
 
-Distributed under the **MIT License**. © 2026 RIFT Organisers.
+Distributed under the **MIT License**. © 2026 Crafted by hand by GGU AI.

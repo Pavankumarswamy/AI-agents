@@ -50,6 +50,10 @@ export default function App() {
     const [terminalLines, setTerminalLines] = useState([{ text: 'Welcome to GGU Terminal. Open a workspace to begin.\n', type: 'system', id: Date.now() }]);
     const [isTerminalRunning, setIsTerminalRunning] = useState(false);
 
+    // ── Lifted Editor State ──────────────────────────────────────────────────
+    const [openPaths, setOpenPaths] = useState([]);
+    const [activePath, setActivePath] = useState(null);
+
     const pollRef = useRef(null);
     const terminalWsRef = useRef(null);
 
@@ -249,6 +253,24 @@ export default function App() {
         }
     }, [runState.runId, terminalCwd]);
 
+    const openFile = useCallback((path) => {
+        if (!path) return;
+        setOpenPaths(prev => prev.includes(path) ? prev : [...prev, path]);
+        setActivePath(path);
+        setActiveTab('code');
+    }, []);
+
+    const closeFile = useCallback((path) => {
+        if (!path) return;
+        setOpenPaths(prev => {
+            const next = prev.filter(p => p !== path);
+            if (activePath === path) {
+                setActivePath(next.length > 0 ? next[next.length - 1] : null);
+            }
+            return next;
+        });
+    }, [activePath]);
+
     // Cleanup on unmount
     useEffect(() => () => clearInterval(pollRef.current), []);
 
@@ -263,8 +285,9 @@ export default function App() {
     const ctx = useMemo(() => ({
         runState, setRunState, startRun, startLocalRun, loadWorkspace, manualSave, downloadFixedCode, API_BASE, configStatus, fetchConfig,
         snippets, setSnippets, sendTerminalCommand, terminalCwd,
-        terminalLines, terminalWsRef, isTerminalRunning, setIsTerminalRunning
-    }), [runState, startRun, startLocalRun, loadWorkspace, manualSave, downloadFixedCode, configStatus, fetchConfig, snippets, sendTerminalCommand, terminalCwd, terminalLines, isTerminalRunning]);
+        terminalLines, terminalWsRef, isTerminalRunning, setIsTerminalRunning,
+        openPaths, setOpenPaths, activePath, setActivePath, openFile, closeFile
+    }), [runState, startRun, startLocalRun, loadWorkspace, manualSave, downloadFixedCode, configStatus, fetchConfig, snippets, sendTerminalCommand, terminalCwd, terminalLines, isTerminalRunning, openPaths, activePath, openFile, closeFile]);
 
     return (
         <AppContext.Provider value={ctx}>

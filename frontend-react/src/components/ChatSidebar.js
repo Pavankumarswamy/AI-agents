@@ -24,6 +24,16 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
     const scrollRef = useRef(null);
     const sessionTabsListRef = useRef(null);
 
+    const [chatMode, setChatMode] = useState('fast');
+    const [theme, setTheme] = useState('default');
+
+    useEffect(() => {
+        document.body.className = '';
+        if (theme !== 'default') {
+            document.body.classList.add(`theme-${theme}`);
+        }
+    }, [theme]);
+
     const activeModel = apiData.model || configStatus.nvidia_model || 'Loading...';
 
     useEffect(() => {
@@ -155,7 +165,8 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
                 file_content: activeFile?.content || '',
                 api_data: Object.keys(apiData).length > 0 ? apiData : null,
                 repo_context: repoFiles.map(f => ({ path: f.path, content: f.content })),
-                session_id: sessionId
+                session_id: sessionId,
+                chat_mode: chatMode
             });
 
             clearTimeout(verifyTimer);
@@ -381,6 +392,31 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
             </div>
             {/* ── Chat Input ── */}
             <div className="chat-footer">
+                <div className="chat-options-bar" style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+                    <div className="mode-selector" style={{ display: 'flex', background: 'var(--bg-card)', borderRadius: '4px', overflow: 'hidden', border: '1px solid var(--border)' }}>
+                        <button
+                            className={`mode-btn ${chatMode === 'plan' ? 'active' : ''}`}
+                            onClick={() => setChatMode('plan')}
+                            style={{ padding: '4px 8px', fontSize: '0.7rem', background: chatMode === 'plan' ? 'var(--accent-blue)' : 'transparent', color: chatMode === 'plan' ? '#fff' : 'var(--text-secondary)' }}
+                        >📖 Plan Mode</button>
+                        <button
+                            className={`mode-btn ${chatMode === 'fast' ? 'active' : ''}`}
+                            onClick={() => setChatMode('fast')}
+                            style={{ padding: '4px 8px', fontSize: '0.7rem', background: chatMode === 'fast' ? 'var(--accent-green)' : 'transparent', color: chatMode === 'fast' ? '#fff' : 'var(--text-secondary)' }}
+                        >⚡ Fast Mode</button>
+                    </div>
+
+                    <select
+                        value={theme}
+                        onChange={e => setTheme(e.target.value)}
+                        style={{ background: 'var(--bg-card)', color: 'var(--text-primary)', border: '1px solid var(--border)', borderRadius: '4px', fontSize: '0.7rem', padding: '0 8px', outline: 'none' }}
+                    >
+                        <option value="default">Default Theme</option>
+                        <option value="black">Black</option>
+                        <option value="white">White</option>
+                        <option value="chackers-green">Chackers Green</option>
+                    </select>
+                </div>
                 {snippets.length > 0 && (
                     <div className="snippets-preview">
                         {snippets.map(s => (

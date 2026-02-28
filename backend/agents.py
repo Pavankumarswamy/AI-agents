@@ -144,7 +144,17 @@ def run_pipeline(
                 break
 
             # --- Diagnose & Fix ---
-            update_live("fixing", f"Found {len(all_failures)} failure(s) – applying LLM fixes…")
+            filtered_failures = []
+            for failure in all_failures:
+                err_msg = failure.get("error_message", "")
+                if err_msg and str(err_msg).strip() and str(err_msg).strip().lower() != "none":
+                    filtered_failures.append(failure)
+                else:
+                    update_live(append_terminal=f"\n[SKIP] Ignoring failure in {failure.get('file', 'unknown')} as it has no error description.\n")
+            
+            all_failures = filtered_failures
+
+            update_live("fixing", f"Found {len(all_failures)} valid failure(s) – applying LLM fixes…")
             fixed_files = []
 
             for i, failure in enumerate(all_failures):
@@ -167,7 +177,8 @@ def run_pipeline(
                     fixed_files.append(fix_entry["file"])
                     # Update live files in memory for the Monaco editor
                     for f in live.get("files", []):
-                        if f["path"] == fix_entry["file"]:
+                        # Normalize slashes to ensure it matches
+                        if f["path"].replace("\\", "/") == fix_entry["file"].replace("\\", "/"):
                             try:
                                 f["content"] = (Path(repo.working_dir) / f["path"]).read_text(encoding="utf-8", errors="replace")
                             except Exception as e:
@@ -349,11 +360,6 @@ def _apply_fix(repo_dir: str, failure: dict, iteration: int, project_context: st
 
     full_path = Path(repo_dir) / src_file
     
-    # SAFETY CHECK: Never allow fixing files outside the repo or inside .venv/library dirs
-    fpath_str = str(full_path).replace("\\", "/")
-    if "site-packages" in fpath_str or ".venv" in fpath_str or "AppData" in fpath_str:
-        logger.warning(f"BLOCKED: Attempted to fix file outside of repository context: {src_file}")
-        return fix_entry
     fix_entry = {
         "file": src_file,
         "bug_type": bug_type,
@@ -365,6 +371,11 @@ def _apply_fix(repo_dir: str, failure: dict, iteration: int, project_context: st
         "iteration": iteration,
         "agent": "GGU AI-Heal-Agent",
     }
+
+    fpath_str = str(full_path).replace("\\", "/")
+    if "site-packages" in fpath_str or ".venv" in fpath_str or "AppData" in fpath_str:
+        logger.warning(f"BLOCKED: Attempted to fix file outside of repository context: {src_file}")
+        return fix_entry
 
     if not full_path.exists():
         logger.warning(f"Source file not found: {full_path}")

@@ -23,12 +23,13 @@ import sqlite3
 import json
 import asyncio
 import subprocess
+import time
 import platform
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -149,6 +150,28 @@ class LocalOpenRequest(BaseModel):
 class BrowseFolderRequest(BaseModel):
     path: Optional[str] = None
 
+# ... (inside models section) ...
+
+@app.get("/config")
+async def get_config():
+    from state import GLOBAL_CONFIG
+    return {
+        "github_pat_set": bool(GLOBAL_CONFIG.get("github_pat")),
+        "nvidia_api_key_set": bool(GLOBAL_CONFIG.get("nvidia_api_key"))
+    }
+
+@app.post("/config")
+async def update_config(req: ConfigUpdate):
+    from state import GLOBAL_CONFIG, save_projects
+    if req.github_pat:
+        GLOBAL_CONFIG["github_pat"] = req.github_pat
+    if req.nvidia_api_key:
+        GLOBAL_CONFIG["nvidia_api_key"] = req.nvidia_api_key
+    save_projects()
+    return {"status": "ok", "message": "Configuration updated"}
+
+# ...
+
 class DeleteItemRequest(BaseModel):
     run_id: str
     path: str
@@ -228,9 +251,9 @@ def add_chat_message(run_id: str, session_id: str, role: str, content: str):
     except Exception as e:
         logger.warning(f"Failed to add chat message for {run_id}: {e}")
 
-def detect_project_type(repo_path: Path) -> str:
-    """Analyze the root directory to identify the project type."""
-    if not repo_path.exists(): return "Unknown"
+def detect_project_type(repo_path: Path) -> dict:
+    """Analyze the root directory and subdirectories to identify project type and its true root."""
+    if not repo_path.exists(): return {"type": "Unknown", "root": "."}
     
     indicators = {
         "pubspec.yaml": "Flutter/Dart",
@@ -246,25 +269,35 @@ def detect_project_type(repo_path: Path) -> str:
         "Solution.sln": ".NET/C#"
     }
     
-    types = []
+    # 1. Primary Check (Root)
     for file, name in indicators.items():
         if (repo_path / file).exists():
-            types.append(name)
+            # Sub-detection for JS/TS
+            project_type = name
+            if name == "JavaScript/TypeScript (Node.js/React/Vite)":
+                try:
+                    content = (repo_path / "package.json").read_text(encoding="utf-8")
+                    if "react" in content.lower(): project_type += ", React"
+                    if "next" in content.lower(): project_type += ", Next.js"
+                except: pass
+            return {"type": project_type, "root": "."}
             
-    # Sub-detection for JS/TS
-    if "JavaScript/TypeScript (Node.js/React/Vite)" in types:
-        pkg_json = repo_path / "package.json"
-        try:
-            content = pkg_json.read_text(encoding="utf-8")
-            if "react" in content.lower():
-                types.append("React")
-            if "next" in content.lower():
-                types.append("Next.js")
-            if "typescript" in content.lower():
-                types.append("TypeScript")
-        except: pass
+    # 2. Shallow Search (Subdirectories)
+    try:
+        for item in repo_path.iterdir():
+            if item.is_dir() and not item.name.startswith("."):
+                for file, name in indicators.items():
+                    if (item / file).exists():
+                        project_type = name
+                        if name == "JavaScript/TypeScript (Node.js/React/Vite)":
+                            try:
+                                content = (item / "package.json").read_text(encoding="utf-8")
+                                if "react" in content.lower(): project_type += ", React"
+                            except: pass
+                        return {"type": project_type, "root": item.name}
+    except: pass
         
-    return ", ".join(set(types)) if types else "Generic / Unknown"
+    return {"type": "Generic / Unknown", "root": "."}
     
 def refresh_run_files(run_id: str, repo_path: Path) -> list[dict]:
     """Helper to refresh the file list for a run, supporting both git and non-git projects."""
@@ -463,16 +496,20 @@ async def chat_with_agent(req: ChatRequest):
         is_windows = (current_os == "Windows")
         
         # Project Type Detection
-        project_type = "Unknown"
+        project_type_info = {"type": "Unknown", "root": "."}
         repo_path = None
         if req.run_id:
             repo_path = get_repo_path(req.run_id)
             if repo_path:
-                project_type = detect_project_type(repo_path)
+                project_type_info = detect_project_type(repo_path)
+
+        project_type = project_type_info["type"]
+        project_root = project_type_info["root"]
 
         system_instruction = (
             f"You are **GGU AI**, a high-performance **Senior Software Engineer (10+ years exp)** living inside the code editor. Current OS: {current_os}\n"
-            f"Detected Project Type: {project_type}\n\n"
+            f"Detected Project Type: {project_type}\n"
+            f"Detected Project Root folder: `{project_root}`\n\n"
             "--- IDENTITY & EXPERTISE ---\n"
             "You are a master of Software, App, and Web development. You take full ownership of the project's health and architecture. "
             "You are proactive—you don't wait to be asked to fix infrastructure. You ensure best practices for `.gitignore`, `.env`, `README.md`, and dependencies.\n\n"
@@ -484,19 +521,27 @@ async def chat_with_agent(req: ChatRequest):
             "   - Execute tasks one by one. \n"
             "   - **PROACTIVE CONFIG**: If you see missing `.gitignore` or `.env` patterns, include their creation in your plan.\n"
             "   - **CONTINUOUS VALIDATION**: Explicitly state why each step is verified.\n"
+            "   - **INLINE ERROR COMMENTS**: When you run a command and it fails, you MUST immediately go back and edit the code file where the error occurred and add an inline comment (e.g., `# FAILED: [error message]` or `// error: [error message]`) exactly on the line where the issue occurred. This helps the user see exactly what validation failed during your iteration loop.\n"
             "4. **Full Plan Review**: Verify 100% adherence to the `#### Refined Request` and best practices.\n"
             "5. **Finalize**: Provide a `#### Final Summary`.\n\n"
             "--- PREMIUM DISPLAY PATTERNS ---\n"
             "1. Use `#### Header Name` for sections.\n"
             "2. Cite files using `[File.ext]`.\n\n"
             "--- AUTONOMOUS ACTION PROTOCOL ---\n"
-            "1. **CREATE/MODIFY FILES**: To create or modify a file, you MUST use the following EXACT format on a new line:\n"
+            "1. **LOCATE PROJECT ROOT**: Before running commands, inspect the `PROJECT REPOSITORY STRUCTURE` (Map) provided below. If the primary project files (e.g., `pubspec.yaml`, `package.json`, `requirements.txt`) are in a subdirectory (e.g., `/v/`), you MUST `cd` into that directory first.\n"
+            "2. **CREATE FILES & FOLDERS**: To create or modify a file, you MUST use the following EXACT format on a new line:\n"
             "   CREATE_FILE: path/to/file.ext\n"
             "   ```\n"
             "   content here\n"
             "   ```\n"
+            "   To create a new folder, use: `CREATE_FOLDER: path/to/folder` on a new line.\n"
             "   Important: The `CREATE_FILE:` line must be a separate line, immediately followed by the code block. Do NOT skip lines between the command and the code block. Use only forward slashes `/` in paths.\n"
-            "2. **EXECUTE TERMINAL COMMANDS**: To run a command, use: `RUN_COMMAND: command` on a new line.\n\n"
+            "3. **EXPLORE AND READ CODE**: You MUST follow the existing folder structure. To read existing files, use `RUN_COMMAND: cat path/to/file` (or `type` on Windows). To list folders, use `RUN_COMMAND: ls -la` (or `dir` on Windows). Never guess code; read it first and do changes accordingly.\n"
+            "4. **EXECUTE TERMINAL COMMANDS**: To run a command, use: `RUN_COMMAND: command` on a new line.\n"
+            f"   - **CRITICAL**: Current OS is {current_os}. " + 
+            ("On Windows, you MUST use valid PowerShell syntax. Avoid bash-isms like `rm -rf !(path)`. " if is_windows else "Use standard Bash syntax. ") +
+            "If the project is nested, use: `RUN_COMMAND: cd <subdir> && <command>` (or `cd <subdir>; <command>` in PowerShell).\n"
+            "If a command fails, analyze the error and try a different syntax.\n\n"
             "--- SELF-VERIFICATION PROTOCOL (CRITICAL) ---\n"
             "After every action you take (CREATE_FILE, RUN_COMMAND), you will receive a [SYSTEM: ...] message telling you whether the action succeeded or failed.\n"
             "- If you see `[SYSTEM: Successfully created/modified file: X]` or `[SYSTEM: Successfully created directory: X]` → the action PASSED. Proceed to the next step.\n"
@@ -504,9 +549,10 @@ async def chat_with_agent(req: ChatRequest):
             "  1. Analyze the error in the [SYSTEM:] message carefully.\n"
             "  2. Correct your approach (different command, fixed file content, correct path).\n"
             "  3. Retry the action with the corrected version.\n"
-            "  4. Do NOT give up after one failure. You have up to 5 total iterations.\n"
+            "  4. Do NOT give up after one failure. You have up to 30 total iterations.\n"
             "- If exit code is non-zero from a terminal command, read the stderr and fix the issue before retrying.\n"
-            "- NEVER hallucinate success. If the [SYSTEM:] says it failed, treat it as a real failure.\n\n"
+            "- NEVER hallucinate success. If the [SYSTEM:] says it failed, treat it as a real failure.\n"
+            "- DO NOT output `#### Final Summary` or state `Task Complete` until the requested user task is fully implemented AND all verifications have succeeded.\n\n"
             "Think like a **10-year veteran**: **Vibe -> Thought -> Plan -> Step -> Validate -> Satisfy**.\n"
             "Do NOT hallucinate successful validation. Wait for SYSTEM confirmation after an action.\n"
         )
@@ -573,7 +619,7 @@ async def chat_with_agent(req: ChatRequest):
         context_str = "\n\n" + "\n\n".join(context_parts) if context_parts else "\n\n(No project context available.)"
 
         # LLM Logic with iterative tool use
-        max_iterations = 5
+        max_iterations = 30
         iteration = 0
         final_response = ""
         verification_log = []
@@ -610,17 +656,31 @@ async def chat_with_agent(req: ChatRequest):
                 conn.close()
 
                 # Cleanup: Ensure strictly alternating user/assistant roles
+                # Step 1: Separate system instruction from history
+                system_msg = current_messages[0]  # Always the system instruction
+                history = current_messages[1:]     # History messages (user/assistant only)
+
+                # Step 2: Remove leading assistant messages (must start with user)
+                while history and history[0]["role"] == "assistant":
+                    history.pop(0)
+
+                # Step 3: Merge consecutive same-role messages
                 deduped = []
-                for m in current_messages:
+                for m in history:
+                    if m["role"] not in ("user", "assistant"):
+                        m["role"] = "user"  # Force any stray roles to user
                     if deduped and deduped[-1]["role"] == m["role"]:
                         deduped[-1]["content"] += "\n\n" + m["content"]
                     else:
                         deduped.append(m)
 
-                while deduped and deduped[0]["role"] == "assistant":
-                    deduped.pop(0)
+                # Step 4: Ensure the conversation ends with a user message
+                # (the LLM needs the last message to be from the user to respond)
+                if deduped and deduped[-1]["role"] != "user":
+                    deduped.append({"role": "user", "content": "(Please continue.)"})
 
-                current_messages = deduped
+                # Step 5: Reassemble with system instruction first
+                current_messages = [system_msg] + deduped
             except Exception as db_err:
                 logger.error(f"DB error during chat loop: {db_err}")
                 if iteration == 1:
@@ -726,8 +786,9 @@ async def chat_with_agent(req: ChatRequest):
                     action_taken = True
                     try:
                         from git import Repo
+                        from state import GLOBAL_CONFIG
                         repo_obj = Repo(repo_path)
-                        pat = os.getenv("GITHUB_PAT")
+                        pat = GLOBAL_CONFIG.get("github_pat") or os.getenv("GITHUB_PAT")
                         push_changes(repo_obj, pat=pat)
                         tool_feedback.append("Successfully pushed changes to GitHub.")
                     except Exception as e:
@@ -744,22 +805,87 @@ async def chat_with_agent(req: ChatRequest):
                     for cmd_match in cmd_matches:
                         action_taken = True
                         cmd = cmd_match.group(1).strip()
-                        cmd = re.sub(r'[`\s]+$', '', cmd)
+                        # Robust stripping of hallucinations (backticks, quotes, parentheses)
+                        cmd = cmd.strip("`'\"()[] \t\r\n")
+                        # Log hex of first char for debugging corruption
+                        if cmd:
+                            first_char_hex = hex(ord(cmd[0]))
+                            logger.info(f"[CHAT-AGENT] Processed command: '{cmd}' (starts with {first_char_hex})")
+                        
+                        # --- PLATFORM SHIM (Bash -> PowerShell) ---
+                        if is_windows:
+                            # Translate common bashisms
+                            if cmd.startswith("rm -rf "):
+                                path = cmd[7:].strip()
+                                cmd = f"Remove-Item -Recurse -Force {path}"
+                            elif cmd.startswith("cp -r "):
+                                parts = cmd[6:].strip().split()
+                                if len(parts) >= 2:
+                                    cmd = f"Copy-Item -Recurse -Force {parts[0]} {parts[1]}"
+                            elif cmd.startswith("mkdir -p "):
+                                path = cmd[9:].strip()
+                                cmd = f"New-Item -ItemType Directory -Force {path}"
+                            elif cmd == "ls -la" or cmd == "ls -l":
+                                cmd = "ls"
+                            elif "grep" in cmd and "|" in cmd:
+                                cmd = cmd.replace("grep", "Select-String")
+
+                        # --- FLUTTER HOT RELOAD SHIM ---
+                        if "flutter hot" in cmd.lower():
+                            logger.info(f"[CHAT-AGENT] Intercepted flutter hot command: {cmd}")
+                            tool_feedback.append(f"--- TERMINAL OUTPUT ({cmd}) ---\n[INTERCEPTED] Flutter hot reload/restart is an interactive feature. Please ensure 'flutter run' is active in the terminal and use the interactive controls ('r' or 'R') or the UI buttons. Standalone hot reload is not supported by the Flutter CLI.")
+                            # No further action for this command
+                            continue
+
+                        # --- INTERACTIVE COMMAND WARNING ---
+                        if any(x in cmd.lower() for x in ["flutter run", "npm start", "npm run dev"]):
+                            logger.info(f"[CHAT-AGENT] Warning: Intercepted interactive command: {cmd}")
+                            tool_feedback.append(f"--- TERMINAL OUTPUT ({cmd}) ---\n[INTERCEPTED] '{cmd}' is an interactive command. In this chat loop, it would block the system. Please use the interactive Terminal View at the bottom to run the application.")
+                            # No further action for this command
+                            continue
+
                         logger.info(f"[CHAT-AGENT] Executing: {cmd}")
                         try:
                             exec_cmd = cmd
                             if is_windows:
                                 exec_cmd = ["powershell", "-NoProfile", "-Command", cmd]
 
-                            proc = subprocess.run(
+                            # Use detected project root as initial CWD, 
+                            # UNLESS the agent is trying to 'cd' explicitly.
+                            initial_cwd = repo_path
+                            if not cmd.lower().startswith("cd ") and project_type_info.get("root") and project_type_info["root"] != ".":
+                                initial_cwd = repo_path / project_type_info["root"]
+
+                            # Non-blocking execution using asyncio.to_thread
+                            import asyncio
+                            proc = await asyncio.to_thread(
+                                subprocess.run,
                                 exec_cmd,
-                                cwd=repo_path,
+                                cwd=initial_cwd,
                                 shell=not is_windows,
                                 capture_output=True,
                                 text=True,
-                                timeout=60
+                                timeout=20  # Reduced to 20s as requested
                             )
                             output = (proc.stdout + "\n" + proc.stderr).strip()
+                            
+                            # --- FALLBACK: If initial CWD failed, try clone root (only if we weren't already there) ---
+                            if proc.returncode != 0 and initial_cwd != repo_path:
+                                logger.info(f"[CHAT-AGENT] Command failed in nested root, retrying in clone root: {repo_path}")
+                                proc_retry = await asyncio.to_thread(
+                                    subprocess.run,
+                                    exec_cmd,
+                                    cwd=repo_path,
+                                    shell=not is_windows,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=20
+                                )
+                                if proc_retry.returncode == 0:
+                                    proc = proc_retry
+                                    output = (proc.stdout + "\n" + proc.stderr).strip()
+                                    output = f"[HEALED: Automatically retried in clone root]\n" + output
+
                             tool_feedback.append(f"--- TERMINAL OUTPUT ({cmd}) ---\n{output}")
                             if proc.returncode != 0:
                                 tool_success = False
@@ -1142,145 +1268,50 @@ async def terminal_websocket(websocket: WebSocket, run_id: str):
             pass
 
     async def drain_output():
-        """Drain output_queue and send to websocket."""
+        """Drain output_queue and send to websocket continuously for the life of the connection."""
         nonlocal active_process
         buffer = ""
-        while True:
-            try:
-                msg = await asyncio.wait_for(output_queue.get(), timeout=0.05)
-                content = msg.get("content", "")
-                buffer += content
-                # Flush on newline or buffer build-up
-                if "\n" in buffer or "\r" in buffer or len(buffer) > 80:
-                    # Save to live state
-                    if run_id in runs:
-                        old = runs[run_id]["live"].get("terminal_output", "")
-                        runs[run_id]["live"]["terminal_output"] = (old + buffer)[-20000:]
-                    try:
-                        await websocket.send_json({"type": msg["type"], "content": buffer})
-                    except Exception:
-                        return
-                    buffer = ""
-            except asyncio.TimeoutError:
-                # Flush any remaining buffer on timeout
-                if buffer:
-                    if run_id in runs:
-                        old = runs[run_id]["live"].get("terminal_output", "")
-                        runs[run_id]["live"]["terminal_output"] = (old + buffer)[-20000:]
-                    try:
-                        await websocket.send_json({"type": "output", "content": buffer})
-                    except Exception:
-                        return
-                    buffer = ""
-                # Check if process ended
-                if active_process and active_process.poll() is not None:
-                    if buffer:
-                        try: await websocket.send_json({"type": "output", "content": buffer})
-                        except: pass
-                    break
-
-    try:
-        while True:
-            # Receive next message from frontend (with timeout to allow drain_output to run)
-            try:
-                receive_task = asyncio.create_task(websocket.receive_json())
-                drain_task = asyncio.create_task(drain_output())
-
-                done, pending = await asyncio.wait(
-                    [receive_task, drain_task],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-
-                # Cancel pending tasks
-                for t in pending:
-                    t.cancel()
-                    try: await t
-                    except: pass
-
-                if drain_task in done:
-                    # Process ended, notify frontend and wait for next command
-                    if active_process:
-                        exit_code = active_process.wait()
-                        try: await websocket.send_json({"type": "done", "exit_code": exit_code, "cwd": current_cwd})
-                        except: pass
-                        save_projects()
-                        active_process = None
-                    continue
-
-                if receive_task not in done:
-                    continue
-
-                data = receive_task.result()
-
-            except WebSocketDisconnect:
-                logger.info(f"[WS] Client disconnected: {run_id}")
-                if active_process and active_process.poll() is None:
-                    active_process.kill()
-                break
-            except Exception as e:
-                logger.warning(f"[WS] Receive error: {e}")
-                break
-
-            msg_type = data.get("type", "command")
-
-            # ── Handle stdin injection ──────────────────────────────
-            if msg_type == "stdin":
-                stdin_data = data.get("data", "")
-                if active_process and active_process.poll() is None and active_process.stdin:
-                    try:
-                        active_process.stdin.write(stdin_data + "\n")
-                        active_process.stdin.flush()
-                        # Echo input to terminal
+        try:
+            while True:
+                try:
+                    # Wait for output from readers
+                    msg = await asyncio.wait_for(output_queue.get(), timeout=0.1)
+                    content = msg.get("content", "")
+                    buffer += content
+                    
+                    # Flush on newline or limit
+                    if "\n" in buffer or "\r" in buffer or len(buffer) > 200:
                         if run_id in runs:
                             old = runs[run_id]["live"].get("terminal_output", "")
-                            runs[run_id]["live"]["terminal_output"] = (old + stdin_data + "\n")[-20000:]
-                        await websocket.send_json({"type": "output", "content": stdin_data + "\n"})
-                    except Exception as e:
-                        await websocket.send_json({"type": "error", "content": f"stdin error: {e}"})
-                else:
-                    await websocket.send_json({"type": "error", "content": "No active process to send input to."})
-                continue
+                            runs[run_id]["live"]["terminal_output"] = (old + buffer)[-30000:]
+                        await websocket.send_json({"type": msg["type"], "content": buffer})
+                        buffer = ""
+                except asyncio.TimeoutError:
+                    # Periodic flush
+                    if buffer:
+                        if run_id in runs:
+                            old = runs[run_id]["live"].get("terminal_output", "")
+                            runs[run_id]["live"]["terminal_output"] = (old + buffer)[-30000:]
+                        await websocket.send_json({"type": "output", "content": buffer})
+                        buffer = ""
+                    # We NO LONGER break here when process ends. We wait for more output from potentially NEW processes.
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"[WS] Drainer error: {e}")
 
-            # ── Handle new command ──────────────────────────────────
-            command = data.get("command", "")
-            if not command: continue
-
-            cwd = data.get("cwd") or current_cwd
-
-            # Resolve start_dir
-            try:
-                start_dir = Path(cwd)
-                if not str(start_dir.resolve()).startswith(str(repo_root.resolve())):
-                    start_dir = repo_root
-            except Exception:
-                start_dir = repo_root
-
-            # Kill any existing process
-            if active_process and active_process.poll() is None:
-                active_process.kill()
-                active_process.wait()
-                active_process = None
-
-            # Flush old queue
-            while not output_queue.empty():
-                try: output_queue.get_nowait()
-                except: break
-
-            # Build chained cmd: run command, then echo delimiter, then print CWD
-            chained_cmd = f"chcp 65001 >nul 2>&1 & cd /d \"{start_dir}\" & {command}"
+    async def run_command_task(cmd, start_dir):
+        """Run a command in the background and notify when done."""
+        nonlocal active_process
+        try:
+            chained_cmd = f"chcp 65001 >nul 2>&1 & cd /d \"{start_dir}\" & {cmd}"
             logger.info(f"[WS] Executing: {chained_cmd}")
-
-            prompt_line = f"\n{start_dir}> {command}\n"
-            if run_id in runs:
-                old = runs[run_id]["live"].get("terminal_output", "")
-                runs[run_id]["live"]["terminal_output"] = (old + prompt_line)[-20000:]
-            await websocket.send_json({"type": "output", "content": prompt_line})
 
             active_process = subprocess.Popen(
                 chained_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                stdin=subprocess.PIPE,  # Enable stdin for interactive commands
+                stdin=subprocess.PIPE,
                 shell=True,
                 text=True,
                 encoding="utf-8",
@@ -1289,33 +1320,108 @@ async def terminal_websocket(websocket: WebSocket, run_id: str):
                 cwd=str(start_dir),
             )
 
-            # Track new CWD (best-effort after simple cd commands)
-            if command.strip().lower().startswith("cd "):
-                target_path = command.strip()[3:].strip().strip('"')
-                try:
-                    candidate = (Path(cwd) / target_path).resolve()
-                    if candidate.is_dir():
-                        current_cwd = str(candidate)
-                        await websocket.send_json({"type": "cwd", "content": current_cwd})
-                except Exception:
-                    pass
+            # Start readers
+            threading.Thread(target=pipe_reader, args=(active_process.stdout, "output"), daemon=True).start()
+            threading.Thread(target=pipe_reader, args=(active_process.stderr, "error"), daemon=True).start()
 
-            # Start reader threads
-            t1 = threading.Thread(target=pipe_reader, args=(active_process.stdout, "output"), daemon=True)
-            t2 = threading.Thread(target=pipe_reader, args=(active_process.stderr, "error"), daemon=True)
-            t1.start()
-            t2.start()
+            # Wait for completion (blocking in a thread or using communicate)
+            # Since we have readers, we just need to wait for the return code
+            exit_code = active_process.wait()
+            
+            # Small delay to allow readers to finish putting everything in the queue
+            await asyncio.sleep(0.5)
+            
+            await websocket.send_json({"type": "done", "exit_code": exit_code, "cwd": str(start_dir)})
+            save_projects()
+        except asyncio.CancelledError:
+            if active_process and active_process.poll() is None:
+                active_process.kill()
+        except Exception as e:
+            logger.warning(f"[WS] Command task error: {e}")
+            await websocket.send_json({"type": "error", "content": str(e)})
+
+    try:
+        # Start the persistent drainer task
+        drain_task = asyncio.create_task(drain_output())
+        current_cmd_task = None
+
+        while True:
+            # Wait for data from frontend
+            data = await websocket.receive_json()
+            msg_type = data.get("type", "command")
+
+            # ── Handle stdin injection ──────────────────────────────
+            if msg_type == "stdin":
+                stdin_data = data.get("data", "")
+                # Special case: \x03 is Ctrl+C
+                if stdin_data == '\x03':
+                    if active_process and active_process.poll() is None:
+                        active_process.kill()
+                        await websocket.send_json({"type": "output", "content": "^C\n"})
+                    continue
+
+                if active_process and active_process.poll() is None and active_process.stdin:
+                    try:
+                        if not stdin_data.endswith("\n") and not stdin_data.endswith("\r"):
+                            if len(stdin_data) == 1 and ord(stdin_data[0]) < 32: pass
+                            else: stdin_data += "\n"
+                        
+                        active_process.stdin.write(stdin_data)
+                        active_process.stdin.flush()
+                        
+                        if run_id in runs:
+                            old = runs[run_id]["live"].get("terminal_output", "")
+                            runs[run_id]["live"]["terminal_output"] = (old + stdin_data)[-30000:]
+                        await websocket.send_json({"type": "output", "content": stdin_data})
+                    except Exception as e:
+                        await websocket.send_json({"type": "error", "content": f"stdin error: {e}"})
+                else:
+                    await websocket.send_json({"type": "error", "content": "No active process."})
+                continue
+
+            # ── Handle new command ──────────────────────────────────
+            command = data.get("command", "")
+            if not command: continue
+            command = command.strip("`'\"()[] \t\r\n")
+            if not command: continue
+
+            cwd = data.get("cwd") or current_cwd
+            try:
+                start_dir = Path(cwd)
+                if not str(start_dir.resolve()).startswith(str(repo_root.resolve())):
+                    start_dir = repo_root
+            except Exception:
+                start_dir = repo_root
+
+            # Kill existing
+            if active_process and active_process.poll() is None:
+                active_process.kill()
+                active_process.wait()
+            if current_cmd_task and not current_cmd_task.done():
+                current_cmd_task.cancel()
+
+            prompt_line = f"\n{start_dir}> {command}\n"
+            if run_id in runs:
+                old = runs[run_id]["live"].get("terminal_output", "")
+                runs[run_id]["live"]["terminal_output"] = (old + prompt_line)[-30000:]
+            await websocket.send_json({"type": "output", "content": prompt_line})
+
+            # Start the command in the background
+            current_cmd_task = asyncio.create_task(run_command_task(command, start_dir))
 
     except WebSocketDisconnect:
         logger.info(f"[WS] Terminal disconnected: {run_id}")
     except Exception as e:
-        logger.exception(f"[WS] Terminal error: {run_id}")
-        try: await websocket.send_json({"type": "error", "content": str(e)})
-        except: pass
+        logger.warning(f"[WS] WebSocket Loop Error: {e}")
     finally:
+        # Cleanup
         if active_process and active_process.poll() is None:
             try: active_process.kill()
             except: pass
+        if 'drain_task' in locals():
+            drain_task.cancel()
+        if 'current_cmd_task' in locals() and current_cmd_task:
+            current_cmd_task.cancel()
         save_projects()
 
 
@@ -1379,16 +1485,17 @@ async def execute_terminal_command(req: TerminalRequest):
         return {"output": "", "error": f"Internal Shell Error: {str(e)}", "exit_code": 1, "cwd": str(start_dir)}
 
 @app.get("/download/{run_id}")
-async def download_fixed_code(run_id: str):
+async def download_fixed_code(run_id: str, background_tasks: BackgroundTasks):
     target = get_repo_path(run_id)
     if not target: raise HTTPException(status_code=404, detail="Project not found")
     
     zip_root = Path(__file__).parent / "downloads"
     zip_root.mkdir(exist_ok=True)
-    zip_full_path = zip_root / f"project_{run_id}.zip"
+    # Use unique filename to avoid "File in use" errors
+    zip_filename = f"project_{run_id}_{int(time.time())}.zip"
+    zip_full_path = zip_root / zip_filename
     
     try:
-        if zip_full_path.exists(): os.remove(zip_full_path)
         with zipfile.ZipFile(zip_full_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(target):
                 if '.git' in dirs: dirs.remove('.git')
@@ -1396,10 +1503,20 @@ async def download_fixed_code(run_id: str):
                     file_p = Path(root) / file
                     try: zipf.write(file_p, file_p.relative_to(target))
                     except: continue
-        def iterfile():
-            with open(zip_full_path, "rb") as f: yield from f
-        return StreamingResponse(iterfile(), media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=project_{run_id}.zip"})
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+        
+        # Cleanup background task
+        background_tasks.add_task(os.remove, str(zip_full_path))
+        
+        return FileResponse(
+            path=zip_full_path,
+            filename=f"project_{run_id}.zip",
+            media_type="application/zip"
+        )
+    except Exception as e:
+        if zip_full_path.exists():
+            try: os.remove(zip_full_path)
+            except: pass
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ---------------------------------------------------------------------------
 # State Initialization

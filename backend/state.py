@@ -9,13 +9,15 @@ logger = logging.getLogger(__name__)
 # Shared state
 class RUN_PATHS_DICT(dict):
     def __setitem__(self, key, value):
-        import traceback
         logger.info(f"[RUN_PATHS] SET {key} -> {value}")
-        # logger.info("".join(traceback.format_stack()))
         super().__setitem__(key, value)
 
 runs = {}
 RUN_PATHS = RUN_PATHS_DICT()
+GLOBAL_CONFIG = {
+    "github_pat": os.getenv("GITHUB_PAT", ""),
+    "nvidia_api_key": os.getenv("NVIDIA_API_KEY", "")
+}
 
 # Paths
 if getattr(sys, 'frozen', False):
@@ -26,12 +28,13 @@ else:
     ROOT_DIR = BACKEND_DIR.parent
 
 DATA_DIR = ROOT_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 PROJECTS_FILE = DATA_DIR / "projects.json"
 
 def save_projects():
     try:
         data = {
+            "GLOBAL_CONFIG": GLOBAL_CONFIG,
             "RUN_PATHS": {k: str(v) for k, v in RUN_PATHS.items()},
             "RUN_META": {
                 k: {
@@ -50,6 +53,12 @@ def load_projects(import_chat_history_callback=None):
     if PROJECTS_FILE.exists():
         try:
             data = json.loads(PROJECTS_FILE.read_text(encoding="utf-8"))
+            
+            # Load Global Config
+            saved_config = data.get("GLOBAL_CONFIG", {})
+            for k, v in saved_config.items():
+                if v: GLOBAL_CONFIG[k] = v
+            
             saved_paths = data.get("RUN_PATHS", {})
             for k, v in saved_paths.items():
                 logger.info(f"[STATE] Loading RUN_PATH {k} -> {v}")
