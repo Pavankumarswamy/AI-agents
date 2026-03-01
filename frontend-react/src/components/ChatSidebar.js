@@ -25,7 +25,7 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
     const sessionTabsListRef = useRef(null);
 
     const [chatMode, setChatMode] = useState('fast');
-    const [theme, setTheme] = useState('default');
+    const [theme, setTheme] = useState('black');
 
     useEffect(() => {
         document.body.className = '';
@@ -62,7 +62,11 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
                 // Fetch unique session labels for this run
                 const sessData = await axios.get(`${API_BASE}/chat/sessions/${runState.runId}`);
                 if (sessData.data.sessions) {
-                    setAvailableSessions(sessData.data.sessions);
+                    setAvailableSessions(prev => {
+                        // Ensure the current sessionId isn't lost if it doesn't have messages yet
+                        const merged = new Set([...sessData.data.sessions, sessionId]);
+                        return [...merged];
+                    });
                 }
             } catch (err) {
                 console.error('Failed to fetch chat history:', err);
@@ -157,6 +161,11 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
 
             // Show verifying indicator after a short delay (if actions might be taken)
             const verifyTimer = setTimeout(() => setIsVerifying(true), 800);
+
+            // Ensure the UI immediately registers this session if it's new
+            if (!availableSessions.includes(sessionId)) {
+                setAvailableSessions(prev => [...prev, sessionId]);
+            }
 
             const { data } = await axios.post(`${API_BASE}/chat`, {
                 message: payloadMessage,
@@ -259,10 +268,29 @@ const ChatSidebar = memo(({ currentFile, onFileSelect }) => {
                                 >
                                     <span className="tab-icon">💬</span>
                                     <span className="tab-label">{s}</span>
+                                    {s !== 'default' && (
+                                        <button
+                                            className="delete-session-btn"
+                                            onClick={async (e) => {
+                                                e.stopPropagation();
+                                                if (window.confirm(`Delete topic "${s}"?`)) {
+                                                    try {
+                                                        await axios.delete(`${API_BASE}/chat/sessions/${runState.runId}/${s}`);
+                                                        setAvailableSessions(prev => prev.filter(session => session !== s));
+                                                        if (sessionId === s) setSessionId('default');
+                                                    } catch (err) {
+                                                        console.error("Failed to delete session", err);
+                                                        alert("Failed to delete topic");
+                                                    }
+                                                }
+                                            }}
+                                            title="Delete Chat Topic"
+                                        >×</button>
+                                    )}
                                 </div>
                             ))}
                             <div className="add-session-tab" onClick={() => {
-                                const newId = window.prompt("New Chat Topic:", `Topic ${availableSessions.length + 1}`);
+                                const newId = window.prompt("New Chat Topic:", `${availableSessions.length}`);
                                 if (newId) {
                                     setSessionId(newId);
                                     setAvailableSessions(prev => [...new Set([...prev, newId])]);
@@ -768,11 +796,16 @@ const STYLES = `
   .config-header { display: flex; justify-content: space-between; align-items: center; }
   .config-header h5 { margin: 0; color: var(--accent-cyan); font-size: 0.85rem; letter-spacing: 0.5px; }
   
-  .provider-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .provider-btn { background: var(--bg-card); border: 1px solid var(--border); padding: 6px; border-radius: 4px; font-size: 0.72rem; color: var(--text-secondary); cursor: pointer; transition: 0.2s; }
-  .provider-btn:hover { border-color: var(--accent-blue); color: var(--text-primary); background: rgba(79, 142, 247, 0.1); }
+  .session-tabs-list { display: flex; align-items: center; gap: 8px; padding-right: 12px; }
+  .session-tab-item { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 4px; background: rgba(255,255,255,0.05); color: var(--text-secondary); font-size: 0.75rem; cursor: pointer; transition: 0.2s; white-space: nowrap; position: relative; }
+  .session-tab-item:hover { background: rgba(255,255,255,0.1); color: var(--text-primary); }
+  .session-tab-item.active { background: rgba(79, 142, 247, 0.2); color: var(--accent-blue); }
+  .delete-session-btn { background: none; border: none; color: var(--text-muted); cursor: pointer; display: none; margin-left: 4px; padding: 0 4px; font-size: 0.8rem; }
+  .session-tab-item:hover .delete-session-btn { display: inline-block; }
+  .delete-session-btn:hover { color: var(--accent-red); }
+  .add-session-tab { font-size: 0.8rem; cursor: pointer; color: var(--text-muted); padding: 4px 8px; border-radius: 4px; transition: 0.2s; }
+  .add-session-tab:hover { background: rgba(255,255,255,0.1); color: var(--text-primary); }
 
-  .config-fields { display: flex; flex-direction: column; gap: 10px; }
   .field-group { display: flex; flex-direction: column; gap: 4px; }
   .field-group label { font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; font-weight: 700; }
   .field-group input { background: #000; border: 1px solid var(--border); padding: 8px; border-radius: 4px; font-size: 0.78rem; color: var(--text-primary); width: 100%; transition: border 0.3s; }

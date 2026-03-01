@@ -564,6 +564,13 @@ async def chat_with_agent(req: ChatRequest):
                 f"{system_instruction}"
                 "Be sure to cite the main modules using the citation brackets [module_name.py]."
             )
+        elif msg_lower.strip() in ["hi", "hi!", "hello", "hello!", "hey", "hey!", "hoe are you", "how are you", "how are you?", "what's up", "what's up?", "hii", "hiii","who are you","who is this","who are you?"]:
+            system_instruction = (
+                "You are **GGU AI**, a friendly Autonomous AI Agent. "
+                "The user just sent a casual greeting. "
+                "Respond with a very short and polite 1-2 sentence conversational reply (e.g., 'Hello! I am doing well, thanks. How can I help you with your project today?'). "
+                "DO NOT output any Vibe/Plan/Act/Review protocol or lengthy technical responses."
+            )
         elif any(k in msg_lower for k in ["create", "new file", "new folder", "generate code"]):
             system_instruction = (
                 "You are GGU AI, the Autonomous Creator. Your goal is to help the user build new features by creating files and folders.\n"
@@ -865,7 +872,8 @@ async def chat_with_agent(req: ChatRequest):
                                 shell=not is_windows,
                                 capture_output=True,
                                 text=True,
-                                timeout=20  # Reduced to 20s as requested
+                                timeout=20,  # Reduced to 20s as requested
+                                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
                             )
                             output = (proc.stdout + "\n" + proc.stderr).strip()
                             
@@ -879,7 +887,8 @@ async def chat_with_agent(req: ChatRequest):
                                     shell=not is_windows,
                                     capture_output=True,
                                     text=True,
-                                    timeout=20
+                                    timeout=20,
+                                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
                                 )
                                 if proc_retry.returncode == 0:
                                     proc = proc_retry
@@ -984,6 +993,32 @@ async def get_chat_sessions(run_id: str):
     except Exception as e:
         logger.error(f"Sessions fetch failed: {e}")
         return {"sessions": ["default"]}
+
+@app.delete("/chat/sessions/{run_id}/{session_id}")
+async def delete_chat_session(run_id: str, session_id: str):
+    if session_id == "default":
+        raise HTTPException(status_code=400, detail="Cannot delete default session")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM chat_messages WHERE run_id = ? AND session_id = ?", (run_id, session_id))
+        conn.commit()
+        conn.close()
+
+        repo_path = get_repo_path(run_id)
+        if repo_path and repo_path.exists():
+            history_file = repo_path / ".gguai" / "chat_history.json"
+            if history_file.exists():
+                try:
+                    history = json.loads(history_file.read_text(encoding="utf-8"))
+                    new_history = [m for m in history if m.get("session_id", "default") != session_id]
+                    history_file.write_text(json.dumps(new_history, indent=2), encoding="utf-8")
+                except:
+                    pass
+        return {"status": "success", "message": f"Deleted session {session_id}"}
+    except Exception as e:
+        logger.error(f"Failed to delete session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/results/{run_id}")
 async def get_results(run_id: str):
@@ -1318,6 +1353,7 @@ async def terminal_websocket(websocket: WebSocket, run_id: str):
                 errors="replace",
                 bufsize=0,
                 cwd=str(start_dir),
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )
 
             # Start readers
@@ -1452,7 +1488,8 @@ async def execute_terminal_command(req: TerminalRequest):
             shell=True,
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         )
         
         full_output = process.stdout

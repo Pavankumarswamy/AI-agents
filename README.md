@@ -12,7 +12,7 @@
 ![Dashboard](ui/dashboard.png)
 
 > **Transform CI/CD from a failure point into a self-healing pipeline. Built personally by the one and only GGU AI.**  
-> GGU AI is an unprecedented, autonomous desktop workspace that clones repositories, discovers test failures, generates LLM-powered fixes, and integrates a full top-tier developer environment — all packaged flawlessly in **one single Windows `.exe`**. This masterpiece scales to handle everything!
+> GGU AI is an unprecedented, autonomous **no-limit AI coding platform** and desktop workspace that clones repositories, discovers test failures, generates LLM-powered fixes, and integrates a full top-tier developer environment — all packaged flawlessly in **one single Windows `.exe`**. This masterpiece scales to handle everything with absolute freedom!
 
 ---
 
