@@ -1,9 +1,9 @@
 {
     "name": "cicd-healing-agent",
     "version": "1.0.0",
-    "description": "RIFT 2026 – Autonomous CI/CD Healing Agent Desktop App",
+    "description": "GGU AI 2026 – Autonomous CI/CD Healing Agent Desktop App",
     "main": "main.js",
-    "author": "RIFT ORGANISERS",
+    "author": "GGU AI ORGANISERS",
     "license": "MIT",
     "private": true,
     "scripts": {
@@ -20,9 +20,9 @@
         "electron-builder": "^24.13.3"
     },
     "build": {
-        "appId": "com.rift2026.cicd-healing-agent",
-        "productName": "RIFT CI-CD Healing Agent",
-        "copyright": "© 2026 RIFT ORGANISERS",
+        "appId": "com.gguai2026.cicd-healing-agent",
+        "productName": "GGU AI CI-CD Healing Agent",
+        "copyright": "© 2026 GGU AI ORGANISERS",
         "directories": {
             "output": "dist",
             "buildResources": "assets"
@@ -67,7 +67,7 @@
             "oneClick": false,
             "allowToChangeInstallationDirectory": true,
             "license": "LICENSE",
-            "shortcutName": "RIFT CI-CD Healing Agent"
+            "shortcutName": "GGU AI CI-CD Healing Agent"
         },
         "publish": null
     }

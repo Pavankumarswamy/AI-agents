@@ -119,7 +119,7 @@ function createWindow() {
         height: 800,
         minWidth: 900,
         minHeight: 600,
-        title: 'RIFT 2026 – CI/CD Healing Agent',
+        title: 'GGU AI 2026 – CI/CD Healing Agent',
         icon: path.join(__dirname, 'assets', 'icon.png'),
         backgroundColor: '#0d0f1a',
         webPreferences: {

@@ -19,8 +19,8 @@ if "%ORIGIN_URL%"=="" (
 :: Copy latest installer builds to website directory
 echo.
 echo [1/3] Copying built EXEs to website directory...
-copy /Y "electron-app\dist\RIFT CI-CD Healing Agent Setup 1.0.0.exe" "website\GGU_AI_CI_CD_Healing_Agent_Setup_1.0.0.exe"
-copy /Y "electron-app\dist\RIFT CI-CD Healing Agent 1.0.0.exe" "website\GGU_AI_CI_CD_Healing_Agent_1.0.0.exe"
+copy /Y "electron-app\dist\GGU AI CI-CD Healing Agent Setup 1.0.0.exe" "website\GGU_AI_CI_CD_Healing_Agent_Setup_1.0.0.exe"
+copy /Y "electron-app\dist\GGU AI CI-CD Healing Agent 1.0.0.exe" "website\GGU_AI_CI_CD_Healing_Agent_1.0.0.exe"
 
 echo.
 echo [2/3] Setting up Git repository for gh-pages...

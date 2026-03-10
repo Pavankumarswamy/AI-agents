@@ -394,6 +394,11 @@ async def analyze(req: AnalyzeRequest):
     run_id = str(uuid.uuid4())[:8]
     branch_name = derive_branch_name(req.team_name, req.leader_name)
 
+    # Early registration of RUN_PATH to support terminal connection immediately
+    clone_path = get_clone_path(req.repo_url, run_id, req.team_name, req.leader_name)
+    RUN_PATHS[run_id] = clone_path
+    save_projects()
+
     runs[run_id] = {
         "status": "running",
         "team_name": req.team_name,
@@ -535,9 +540,11 @@ async def chat_with_agent(req: ChatRequest):
             "   content here\n"
             "   ```\n"
             "   To create a new folder, use: `CREATE_FOLDER: path/to/folder` on a new line.\n"
+            "   **CRITICAL**: You MUST wrap all file content in triple backticks (```). Do NOT include explanations or verification steps after the closing backticks on the same line or in the same block.\n"
             "   Important: The `CREATE_FILE:` line must be a separate line, immediately followed by the code block. Do NOT skip lines between the command and the code block. Use only forward slashes `/` in paths.\n"
             "3. **EXPLORE AND READ CODE**: You MUST follow the existing folder structure. To read existing files, use `RUN_COMMAND: cat path/to/file` (or `type` on Windows). To list folders, use `RUN_COMMAND: ls -la` (or `dir` on Windows). Never guess code; read it first and do changes accordingly.\n"
             "4. **EXECUTE TERMINAL COMMANDS**: To run a command, use: `RUN_COMMAND: command` on a new line.\n"
+            "   - **CRITICAL**: Do NOT include any natural language, explanations, or 'and check that...' descriptions on the same line as `RUN_COMMAND`. The line must end exactly when the shell command ends.\n"
             f"   - **CRITICAL**: Current OS is {current_os}. " + 
             ("On Windows, you MUST use valid PowerShell syntax. Avoid bash-isms like `rm -rf !(path)`. " if is_windows else "Use standard Bash syntax. ") +
             "If the project is nested, use: `RUN_COMMAND: cd <subdir> && <command>` (or `cd <subdir>; <command>` in PowerShell).\n"
@@ -756,7 +763,13 @@ async def chat_with_agent(req: ChatRequest):
                         if l_strip in ["code", "content:", "code:", "```"]:
                             start_collecting = True
                             continue
-                        if any(l_strip.startswith(x) for x in ["run_command:", "####", "create_file:", "write_file:"]):
+                        # Expanded "breaker" patterns to stop natural language leakage
+                        breakers = [
+                            "run_command:", "####", "create_file:", "write_file:", 
+                            "create_folder:", "mkdir:", "1.", "2.", "3.", "4.", "5.",
+                            "verify", "expected output", "step ", "task complete", "final summary"
+                        ]
+                        if any(l_strip.startswith(x) for x in breakers):
                             break
                         useful_lines.append(line)
                     if useful_lines:
@@ -814,6 +827,15 @@ async def chat_with_agent(req: ChatRequest):
                         cmd = cmd_match.group(1).strip()
                         # Robust stripping of hallucinations (backticks, quotes, parentheses)
                         cmd = cmd.strip("`'\"()[] \t\r\n")
+                        
+                        # Hardening: If the command contains natural language conjunctions like "and check", "to verify", etc.
+                        # we try to truncate it to avoid "The term 'dir and' is not recognized" errors.
+                        stop_phrases = [" and check", " to verify", " and see", " for checking", " which results"]
+                        for stop_p in stop_phrases:
+                            if stop_p in cmd.lower():
+                                idx = cmd.lower().find(stop_p)
+                                logger.warning(f"[CHAT-AGENT] Truncating leaked natural language from command: '{cmd}' -> '{cmd[:idx]}'")
+                                cmd = cmd[:idx].strip()
                         # Log hex of first char for debugging corruption
                         if cmd:
                             first_char_hex = hex(ord(cmd[0]))
@@ -1172,6 +1194,7 @@ async def save_file(req: SaveFileRequest):
         
     full_p.parent.mkdir(parents=True, exist_ok=True)
     full_p.write_text(req.content, encoding="utf-8")
+    logger.info(f"[API] Saved file: {req.file_path} for run: {req.run_id}")
     return {"message": "Saved"}
 
 @app.post("/create")
@@ -1184,13 +1207,19 @@ async def create_item(req: CreateItemRequest):
     if not str(full_p).startswith(str(target.resolve())): 
         raise HTTPException(status_code=403, detail="Illegal path traversal attempt")
     try:
-        if req.type == "folder": full_p.mkdir(parents=True, exist_ok=True)
+        if req.type == "folder": 
+            full_p.mkdir(parents=True, exist_ok=True)
+            logger.info(f"[API] Created folder: {rel_p} for run: {req.run_id}")
         else:
             full_p.parent.mkdir(parents=True, exist_ok=True)
-            if not full_p.exists(): full_p.write_text("", encoding="utf-8")
+            if not full_p.exists(): 
+                full_p.write_text("", encoding="utf-8")
+                logger.info(f"[API] Created empty file: {rel_p} for run: {req.run_id}")
         updated_live = refresh_run_files(req.run_id, target)
         return {"message": "Created", "files": updated_live}
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e: 
+        logger.error(f"[API] Failed to create {req.type} {rel_p}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/delete")
 async def delete_item(req: DeleteItemRequest):
@@ -1270,11 +1299,14 @@ async def terminal_websocket(websocket: WebSocket, run_id: str):
 
     repo_root = get_repo_path(run_id)
     if not repo_root:
+        logger.warning(f"[WS] Project not found for run_id: '{run_id}'. Available keys in RUN_PATHS: {list(RUN_PATHS.keys())}")
         try:
-            await websocket.send_json({"type": "error", "content": "Project not found"})
+            await websocket.send_json({"type": "error", "content": f"Project not found for run_id: {run_id}"})
             await websocket.close()
         except: pass
         return
+    
+    logger.info(f"[WS] Resolved repo_root for '{run_id}': {repo_root}")
 
     loop = asyncio.get_running_loop()
     logger.info(f"[WS] Session active: {run_id}")

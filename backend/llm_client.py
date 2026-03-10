@@ -37,7 +37,7 @@ OLLAMA_MODEL      = os.getenv("OLLAMA_MODEL",     "llama3")
 FIX_PROMPT = """\
 You are an expert software engineer. Fix the following {bug_type} bug in the file '{file_path}' at line {line_number}.
 
-Project Structure Context:
+Project Structure Context (other files for reference):
 {project_context}
 
 Error/Instruction:
@@ -49,13 +49,12 @@ Original code of '{file_path}':
 ```
 
 Instructions:
-- If the error message starts with 'Improvement item:', treat it as a direct instruction to modify/improve the code.
-- Return ONLY the corrected full file content, no explanations outside the code.
-- IMPORTANT: Add concise, helpful comments inside the code explaining exactly what you changed and why (e.g. # FIXED: Corrected edge case handling, // HEALED: Updated variable type).
-- Do NOT wrap the output in markdown code fences.
-- Preserve all indentation and file structure.
-- Make the minimal change necessary to fix the error.
-- If the bug is in a different file (e.g. the test is correct but the source it calls is wrong), fix the file that most likely contains the error based on the context.
+1. Return ONLY the corrected FULL content of the file '{file_path}'.
+2. DO NOT include any explanations, walkthroughs, or markdown code fences (```).
+3. DO NOT include any of the reference files provided in the "Project Structure Context" section.
+4. IMPORTANT: Add concise, helpful comments inside the code explaining exactly what you changed and why (e.g. # FIXED: Corrected edge case handling).
+5. If the error is actually in a different file, fix that file instead and return ONLY its content.
+6. Return the raw code as plain text.
 """.strip()
 
 COMMIT_PROMPT = """\
@@ -213,20 +212,51 @@ def _call_nvidia(messages: list[dict], api_data: dict | None = None) -> str:
 
 
 def _strip_markdown(text: str) -> str:
-    """Extract code from a markdown block if present, otherwise return original."""
+    """
+    Extract code from a markdown block if present, and remove any leaked
+    context markers or headers from the LLM response.
+    """
+    text = text.strip()
+    
+    # 1. Handle markdown code fences if LLM ignored instructions
     if "```" in text:
-        # Simple extraction: find the first block and take everything inside
-        # Skip the language identifier if present (e.g. ```python)
         try:
             parts = text.split("```")
             if len(parts) >= 2:
                 # The code is between the first and second ```
                 content = parts[1]
-                # Split at first newline to remove potential language tag
+                # Split at first newline to remove potential language tag (e.g. ```python)
                 lines = content.splitlines()
                 if lines and (lines[0].strip().lower() in ("python", "javascript", "js", "ts", "typescript", "jsx", "tsx", "html", "css")):
-                    return "\n".join(lines[1:]).strip()
-                return content.strip()
+                    text = "\n".join(lines[1:]).strip()
+                else:
+                    text = content.strip()
         except Exception:
             pass
-    return text.strip()
+
+    # 2. Aggressively remove leaked context markers and headers
+    lines = text.splitlines()
+    cleaned_lines = []
+    ignoring = False
+    
+    # Common headers to strip
+    bad_starts = (
+        "--- File:", 
+        "[[[ CONTEXT_FILE:", 
+        "Full Project Source Code Context:", 
+        "Here is the fixed code",
+        "```", # Extra fences
+    )
+
+    for line in lines:
+        sline = line.strip()
+        
+        # If we see a marker for a DIFFERENT file, we might be in a multi-file bounce
+        # But per prompt, they should only return one. 
+        # If we see a marker, skip that line.
+        if any(sline.startswith(b) for b in bad_starts):
+            continue
+            
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines).strip()

@@ -61,9 +61,9 @@ def clone_repo(repo_url: str, run_id: str, pat: str | None = None, team_name: st
     
     logger.info("Clone complete.")
     
-    # Register the path in main.RUN_PATHS immediately after successful clone
+    # Register the path in state.RUN_PATHS immediately after successful clone
     try:
-        from main import RUN_PATHS, save_projects
+        from state import RUN_PATHS, save_projects
         RUN_PATHS[run_id] = Path(clone_path)
         save_projects()
         logger.info(f"[Git] Registered RUN_PATH for {run_id}: {clone_path}")

@@ -165,10 +165,11 @@ def run_pipeline(
                 project_context_parts = ["Full Project Source Code Context:"]
                 extensions = {".py", ".js", ".ts", ".jsx", ".tsx"}
                 # Use current in-memory content which reflects any fixes applied in this iteration so far
-                for f in live.get("files", []):
-                    path = f["path"]
-                    if path.lower().endswith(tuple(extensions)):
-                        project_context_parts.append(f"--- File: {path} ---\n{f.get('content', '')}\n")
+                all_files_dict = {f["path"]: f for f in live.get("files", [])}
+                for path, f_data in all_files_dict.items():
+                    if f_data.get('type') == 'file' and any(path.lower().endswith(ext) for ext in extensions):
+                        project_context_parts.append(f"[[[ CONTEXT_FILE: {path} ]]]\n{f_data.get('content', '')}\n")
+
                 context_str = "\n".join(project_context_parts)
 
                 fix_entry = _apply_fix(repo.working_dir, failure, iteration, project_context=context_str)
@@ -358,7 +359,7 @@ def _apply_fix(repo_dir: str, failure: dict, iteration: int, project_context: st
     error_msg = failure.get("error_message", "")
     bug_type = failure.get("bug_type", "LOGIC")
 
-    full_path = Path(repo_dir) / src_file
+    full_p = (Path(repo_dir) / src_file).resolve()
     
     fix_entry = {
         "file": src_file,
@@ -372,17 +373,19 @@ def _apply_fix(repo_dir: str, failure: dict, iteration: int, project_context: st
         "agent": "GGU AI-Heal-Agent",
     }
 
-    fpath_str = str(full_path).replace("\\", "/")
+    fpath_str = str(full_p).replace("\\", "/")
     if "site-packages" in fpath_str or ".venv" in fpath_str or "AppData" in fpath_str:
         logger.warning(f"BLOCKED: Attempted to fix file outside of repository context: {src_file}")
         return fix_entry
 
-    if not full_path.exists():
-        logger.warning(f"Source file not found: {full_path}")
-        return fix_entry
-
     try:
-        original_code = full_path.read_text(encoding="utf-8", errors="replace")
+        # If file doesn't exist, we treat it as an empty file to be "fixed" (created)
+        original_code = ""
+        if full_p.exists():
+            original_code = full_p.read_text(encoding="utf-8", errors="replace")
+        else:
+            logger.info(f"File {src_file} does not exist. Agent will attempt to create it.")
+
         fixed_code = generate_fix(
             bug_type=bug_type,
             file_path=src_file,
@@ -392,8 +395,9 @@ def _apply_fix(repo_dir: str, failure: dict, iteration: int, project_context: st
             project_context=project_context,
         )
 
-        if fixed_code and fixed_code != original_code:
-            full_path.write_text(fixed_code, encoding="utf-8")
+        if fixed_code and (fixed_code != original_code or not full_p.exists()):
+            full_p.parent.mkdir(parents=True, exist_ok=True)
+            full_p.write_text(fixed_code, encoding="utf-8")
             commit_msg = explain_error(bug_type, error_msg)
             fix_entry["commit_message"] = commit_msg
             fix_entry["status"] = "fixed"
